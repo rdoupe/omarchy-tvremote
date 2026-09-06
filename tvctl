@@ -456,11 +456,25 @@ def foreground_app(timeout=3):
     An app that has been used stays `running` in the background long after it
     left the screen, so `visible` is the only field that answers this.
     """
-    for app in load_apps():
+    apps = load_apps()
+    found = [None]
+    lock = threading.Lock()
+
+    def probe(app):
         info = app_status(app["appId"], timeout)
         if info and info.get("visible"):
-            return app["key"]
-    return ""
+            with lock:
+                found[0] = app["key"]
+
+    # In parallel: this TV's HTTP server answers one request at a time, and a
+    # serial sweep of nine apps was slow enough to delay the volume read that
+    # runs right after a volume key -- the panel would show a stale number.
+    threads = [threading.Thread(target=probe, args=(a,), daemon=True) for a in apps]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout + 1)
+    return found[0] or ""
 
 
 def short_name(name):
@@ -716,9 +730,19 @@ def _launch_and_report(key):
 
 
 def _volume_after(_cmd):
-    time.sleep(0.35)
-    volume, muted = read_volume()
-    if volume is not None:
+    """Report the new volume, twice.
+
+    The TV applies a volume key on its own schedule and will happily answer
+    the UPnP query with the old number if asked too soon, so this reads once
+    quickly for responsiveness and once again to correct itself.
+    """
+    last = None
+    for delay in (0.35, 1.0):
+        time.sleep(delay if last is None else delay - 0.35)
+        volume, muted = read_volume()
+        if volume is None or volume == last:
+            continue
+        last = volume
         emit({"type": "volume", "volume": volume, "muted": bool(muted)})
 
 
