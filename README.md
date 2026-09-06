@@ -8,6 +8,12 @@ keys, Enter and Backspace drive the TV directly**, which is the point of the
 widget; the on-screen D-pad is there for the mouse. Scrolling the bar icon
 changes volume without opening anything, and right-clicking it mutes.
 
+**Holding a button repeats like the real remote.** A press sends Tizen's
+`Press`, the release sends `Release`, and the TV runs its own repeat
+acceleration in between — so a held volume button ramps at exactly the rate
+the physical remote ramps, rather than at whatever rate a timer here would
+pick. A tap is just a very short hold.
+
 Streaming apps get one-click tiles — YouTube on a full-width primary tile,
 then Netflix, Prime Video and Spotify — and the panel can probe the TV for
 whatever else is installed.
@@ -83,8 +89,12 @@ parallel — a full sweep takes under a second) and keeps whichever the TV
 acknowledges. Anything the catalog misses can still be added to the JSON by
 hand.
 
-The TV also serves **no artwork** for its apps (`/api/v2/applications/<id>/icon`
-is a 404), which is why tiles are names in brand colours rather than logos.
+The TV also serves **no artwork** for its apps — `/api/v2/applications/<id>/icon`,
+`/icon.png`, `/image`, `/thumbnail` and the DIAL equivalent are all 404s. The
+tiles use the brand marks in the Nerd Font the bar already renders with
+(YouTube, Netflix, Amazon, Spotify, Apple, Twitch), which are sharper at tile
+size than a bitmap would be; apps with no mark fall back to their name in a
+brand colour.
 
 ## Using it from the shell
 
@@ -98,6 +108,10 @@ cd ~/.config/omarchy/plugins/io.github.rdoupe.tvremote
 ./tvctl apps                 # configured apps + install status
 ./tvctl scan --save          # discover what is on the TV
 ./tvctl state
+```
+
+```bash
+./tvctl hold voldown 1.5     # hold a key, the way the panel's buttons do
 ```
 
 Keys: `up down left right enter back volup voldown mute home power`.

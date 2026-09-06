@@ -55,6 +55,11 @@ Panel {
   property bool scanning: false
   property bool moreOpen: false
 
+  // The key currently held down. Press/Release is what the physical remote
+  // sends, so the TV runs its own repeat acceleration for as long as a button
+  // is down -- a tap is just a very short hold.
+  property string heldKey: ""
+
   // Tiles vs discoveries: a scan finds everything on the TV, but only pinned
   // apps get a tile. Right-click moves an app between the two.
   readonly property var pinnedApps: apps.filter(function(a) { return a.show !== false })
@@ -90,6 +95,21 @@ Panel {
     lastKey = key
     flash.restart()
     send(key)
+  }
+
+  function holdKey(key) {
+    if (heldKey !== "") releaseKey(heldKey)
+    heldKey = key
+    lastKey = key
+    flash.stop()
+    send("press:" + key)
+  }
+
+  function releaseKey(key) {
+    if (heldKey === "") return
+    heldKey = ""
+    send("release:" + key)
+    flash.restart()
   }
 
   function launchApp(key) {
@@ -191,6 +211,10 @@ Panel {
       errorText = ""
       if (!daemon.running) daemon.running = true
     } else {
+      // Never leave a key down: the TV would keep repeating with the panel
+      // gone. (tvctl releases on exit too, but the panel should not rely on
+      // its own shutdown path to stop the volume climbing.)
+      if (heldKey !== "") releaseKey(heldKey)
       if (daemon.running) daemon.write("quit\n")
       linkUp = false
     }
@@ -215,7 +239,10 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰠹"
+    // A set with an antenna (md-television_classic, U+F07F4). A flat-screen
+    // glyph is a coin-flip against the monitor widget's icon two slots over;
+    // the antenna is what makes this read as a TV and not a display.
+    text: "󰟴"
     active: root.opened
     opacity: root.reachable ? 1 : 0.45
     tooltipText: root.tooltip()
@@ -498,7 +525,14 @@ Panel {
     property bool primary: false
     property bool muted: false
 
-    text: app ? String(app.name) : ""
+    readonly property string glyph: app ? String(app.glyph || "") : ""
+
+    // A third-width tile cannot hold a logo and a name without spilling, and
+    // the logo alone is the more recognisable half -- so the name only shows
+    // on the primary tile, or when the app has no mark at all.
+    text: app && (primary || glyph === "") ? String(app.name) : ""
+    iconText: glyph
+    iconSize: primary ? Style.font.heading : Style.font.iconLarge
     fontSize: primary ? Style.font.subtitle : Style.font.caption
     foreground: app ? String(app.color) : root.fg
     accent: foreground
@@ -529,8 +563,20 @@ Panel {
     fontSize: Style.font.body
     foreground: root.fg
     bordered: true
-    active: root.lastKey === key
+    active: root.lastKey === key || root.heldKey === key
     tooltipText: tip
-    onClicked: root.press(key)
+
+    // Sits above Button's own MouseArea so a press and its release both land
+    // here; Button.clicked is deliberately unused, since a tap is already the
+    // short end of the same hold.
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: false
+      acceptedButtons: Qt.LeftButton
+      cursorShape: Qt.PointingHandCursor
+      onPressed: root.holdKey(keyButton.key)
+      onReleased: root.releaseKey(keyButton.key)
+      onCanceled: root.releaseKey(keyButton.key)
+    }
   }
 }

@@ -70,10 +70,14 @@ APPS_FILE = os.path.expanduser(
 # "more" until pinned. Otherwise the first scan buries the four apps that
 # matter under Internet, Gallery and Xbox.
 DEFAULT_APPS = [
-    {"key": "youtube", "name": "YouTube", "appId": "111299001912", "color": "#ff0033", "show": True},
-    {"key": "netflix", "name": "Netflix", "appId": "3201907018807", "color": "#e50914", "show": True},
-    {"key": "prime", "name": "Prime Video", "appId": "3201910019365", "color": "#00a8e1", "show": True},
-    {"key": "spotify", "name": "Spotify", "appId": "3201606009684", "color": "#1db954", "show": True},
+    {"key": "youtube", "name": "YouTube", "appId": "111299001912",
+     "color": "#ff0033", "glyph": "\uf16a", "show": True},
+    {"key": "netflix", "name": "Netflix", "appId": "3201907018807",
+     "color": "#e50914", "glyph": "\U000f0746", "show": True},
+    {"key": "prime", "name": "Prime Video", "appId": "3201910019365",
+     "color": "#00a8e1", "glyph": "\uf270", "show": True},
+    {"key": "spotify", "name": "Spotify", "appId": "3201606009684",
+     "color": "#1db954", "glyph": "\uf1bc", "show": True},
 ]
 
 # Probed by `tvctl scan`. This TV answers no enumeration request -- there is no
@@ -149,6 +153,24 @@ CANDIDATE_APPS = {
 }
 
 
+# Real brand marks, from the Nerd Font the bar already uses -- the TV serves
+# no artwork of its own (every /icon endpoint is a 404), and these are sharper
+# at tile size than a bitmap would be anyway. Apps with no mark fall back to
+# their name.
+GLYPHS = {
+    "YouTube": "\uf16a", "YouTube Kids": "\uf16a", "YouTube TV": "\uf16a",
+    "Netflix": "\U000f0746",
+    "Prime Video": "\uf270", "Amazon Music": "\uf270",
+    "Spotify": "\uf1bc",
+    "Apple TV": "\uf179", "Apple Music": "\uf179",
+    "Twitch": "\uf1e8",
+}
+
+
+def default_glyph(name):
+    return GLYPHS.get(name, "")
+
+
 def default_color(name):
     # Brand colours, lightened where the real one would disappear against a
     # dark panel -- Disney's navy is unreadable at tile size.
@@ -181,6 +203,7 @@ def load_apps():
                 "name": name,
                 "appId": str(a["appId"]),
                 "color": str(a.get("color") or default_color(name)),
+                "glyph": str(a.get("glyph", default_glyph(name))),
                 "show": a.get("show", True) is not False,
             })
         if cleaned:
@@ -358,11 +381,19 @@ def connect(timeout=8):
         raise
 
 
-def send_key(ws, name):
+def send_key(ws, name, cmd="Click"):
+    """Send one key. `cmd` is Click, or Press/Release for hold-to-repeat.
+
+    Press/Release is what the physical remote does: the TV runs its own
+    acceleration for as long as the button is down, so a hold ramps the way
+    the real remote ramps instead of at whatever rate a timer here picks. A
+    quick Press/Release pair registers as exactly one step, so taps and holds
+    share this one path.
+    """
     ws.send(json.dumps({
         "method": "ms.remote.control",
         "params": {
-            "Cmd": "Click",
+            "Cmd": cmd,
             "DataOfCmd": KEYS[name],
             "Option": "false",
             "TypeOfRemote": "SendRemoteKey",
@@ -424,6 +455,13 @@ def read_device(timeout=3):
             "power": device.get("PowerState", "unknown")}
 
 
+# Set while a key is held down. This TV's little HTTP server is easily
+# saturated, and a burst of app-status probes during a hold visibly starves
+# the TV's own key-repeat -- a 1.3s hold that should ramp eight steps moves
+# one. Nothing polls it while a button is down.
+HELD_KEYS = set()
+
+
 def app_status(app_id, timeout=3):
     try:
         with urllib.request.urlopen(
@@ -456,7 +494,11 @@ def foreground_app(timeout=3):
     An app that has been used stays `running` in the background long after it
     left the screen, so `visible` is the only field that answers this.
     """
-    apps = load_apps()
+    if HELD_KEYS:
+        return ""
+    # Only the pinned apps. Probing every discovered app doubles the request
+    # burst for a highlight nobody can see on a hidden tile.
+    apps = [a for a in load_apps() if a.get("show", True)]
     found = [None]
     lock = threading.Lock()
 
@@ -511,6 +553,8 @@ def scan_apps(timeout=3):
                 "appId": app_id,
                 "color": known[app_id]["color"] if app_id in known
                          else default_color(name),
+                "glyph": known[app_id]["glyph"] if app_id in known
+                         else default_glyph(name),
                 # A newly discovered app stays behind "more" until pinned.
                 "show": known[app_id]["show"] if app_id in known else False,
             }
@@ -538,7 +582,7 @@ def merge_apps(found):
     return [dict(a) for a in found]
 
 
-def state_payload(with_volume=True):
+def state_payload(with_volume=True, with_app=True):
     device = read_device()
     payload = {
         "type": "state",
@@ -552,7 +596,7 @@ def state_payload(with_volume=True):
         volume, muted = read_volume()
         payload["volume"] = -1 if volume is None else volume
         payload["muted"] = bool(muted)
-        payload["app"] = foreground_app()
+        payload["app"] = foreground_app() if with_app else ""
     else:
         payload["volume"] = -1
         payload["muted"] = False
@@ -569,8 +613,13 @@ class Server:
     def __init__(self):
         self.ws = None
         self.lock = threading.Lock()
+        # Held across the handshake so two threads cannot each open a socket.
+        self.connect_lock = threading.Lock()
         self.reader = None
         self.generation = 0
+        # Keys currently held down. A Press with no matching Release leaves
+        # the TV ramping forever, so these are released on the way out.
+        self.held = set()
 
     def _drain(self, ws, generation):
         """Own all reads: pings must be answered even while nothing is sent."""
@@ -586,25 +635,43 @@ class Server:
         ws.close()
 
     def ensure(self):
+        """Return the live socket, opening one if needed.
+
+        Double-checked on purpose: the panel warms the connection the moment
+        it opens, and a fast first keypress raced it. Both callers saw no
+        socket, both connected, and the loser's socket was orphaned and
+        closed -- under a held key, that reads to the TV as the remote
+        disconnecting, so a hold that should ramp registered a single step.
+        """
         with self.lock:
             if self.ws is not None:
                 return self.ws
-        ws, newly_paired = connect()
-        with self.lock:
-            self.generation += 1
-            self.ws = ws
-            generation = self.generation
-        self.reader = threading.Thread(
-            target=self._drain, args=(ws, generation), daemon=True)
-        self.reader.start()
-        emit({"type": "connected", "paired_now": newly_paired})
-        return ws
+        with self.connect_lock:
+            with self.lock:
+                if self.ws is not None:
+                    return self.ws
+            ws, newly_paired = connect()
+            with self.lock:
+                self.generation += 1
+                self.ws = ws
+                generation = self.generation
+            self.reader = threading.Thread(
+                target=self._drain, args=(ws, generation), daemon=True)
+            self.reader.start()
+            emit({"type": "connected", "paired_now": newly_paired})
+            return ws
 
-    def key(self, name):
+    def key(self, name, cmd="Click"):
         """Send a key, retrying once: an idle socket may have been dropped."""
         for attempt in (0, 1):
             try:
-                send_key(self.ensure(), name)
+                send_key(self.ensure(), name, cmd)
+                if cmd == "Press":
+                    self.held.add(name)
+                    HELD_KEYS.add(name)
+                elif cmd == "Release":
+                    self.held.discard(name)
+                    HELD_KEYS.discard(name)
                 return True
             except Exception as exc:
                 with self.lock:
@@ -620,6 +687,15 @@ class Server:
         return False
 
     def close(self):
+        # Let go of anything still held before dropping the socket, or the TV
+        # carries on repeating after the panel has gone.
+        for name in list(self.held):
+            try:
+                send_key(self.ws, name, "Release")
+            except Exception:
+                pass
+        self.held.clear()
+        HELD_KEYS.clear()
         with self.lock:
             ws, self.ws = self.ws, None
             self.generation += 1
@@ -642,13 +718,29 @@ def _warm(server):
 
 def serve():
     server = Server()
+    # When each key was asked for, and when its Press actually went out.
+    held_since = {}
+    pressed_at = {}
     # Report reachability immediately: the panel opens on this, and a TV that
     # is off should say so rather than look like a hung connection.
     emit({"type": "apps", "apps": load_apps()})
-    threading.Thread(target=lambda: emit(state_payload()), daemon=True).start()
+    # The opening poll deliberately skips the app probe. It is a burst of
+    # requests this TV's HTTP server answers slowly, and it lands exactly when
+    # someone who just opened the panel is holding a volume button -- which
+    # starves the TV's key repeat down to a single step. The foreground app is
+    # worth knowing, but not at the cost of the first hold.
+    threading.Thread(target=lambda: emit(state_payload(with_app=False)),
+                     daemon=True).start()
     threading.Thread(target=_warm, args=(server,), daemon=True).start()
+    threading.Thread(target=_deferred_app, daemon=True).start()
     try:
-        for line in sys.stdin:
+        # readline(), not `for line in sys.stdin`: the iterator reads ahead in
+        # chunks, so a press and the release that follows it a second later
+        # arrived together and every hold collapsed into a single tap.
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
             cmd = line.strip().lower()
             if not cmd:
                 continue
@@ -669,6 +761,33 @@ def serve():
                 continue
             if cmd == "scan":
                 threading.Thread(target=_scan_and_report, daemon=True).start()
+                continue
+            if cmd.startswith("press:") or cmd.startswith("release:"):
+                verb, _, name = cmd.partition(":")
+                if name not in KEYS:
+                    emit({"type": "error", "msg": f"unknown key: {name}"})
+                    continue
+                now = time.monotonic()
+                if verb == "press":
+                    # Stamped before the send, which can block: the very first
+                    # press waits on the opening handshake, and without this
+                    # the release that follows would cut a real one-second
+                    # hold down to the few milliseconds left after connecting.
+                    held_since[name] = now
+                    if server.key(name, "Press"):
+                        pressed_at[name] = time.monotonic()
+                        emit({"type": "ack", "key": cmd})
+                else:
+                    intended = now - held_since.pop(name, now)
+                    already = now - pressed_at.pop(name, now)
+                    shortfall = intended - already
+                    if shortfall > 0.05:
+                        time.sleep(min(shortfall, 5.0))
+                    if server.key(name, "Release"):
+                        emit({"type": "ack", "key": cmd})
+                        if name in VOLUME_KEYS:
+                            threading.Thread(target=_volume_after,
+                                             args=(name,), daemon=True).start()
                 continue
             if cmd.startswith("app:"):
                 key = cmd[4:]
@@ -706,6 +825,18 @@ def toggle_pin(key):
     return hit
 
 
+def _deferred_app():
+    """Report the foreground app once the panel has settled, not on open."""
+    time.sleep(1.5)
+    for _ in range(20):          # never probe over someone's held button
+        if not HELD_KEYS:
+            break
+        time.sleep(0.5)
+    app = foreground_app()
+    if app:
+        emit({"type": "app", "app": app})
+
+
 def _scan_and_report():
     emit({"type": "scanning"})
     try:
@@ -739,6 +870,8 @@ def _volume_after(_cmd):
     last = None
     for delay in (0.35, 1.0):
         time.sleep(delay if last is None else delay - 0.35)
+        if HELD_KEYS:
+            continue  # still ramping; the release read will be the real one
         volume, muted = read_volume()
         if volume is None or volume == last:
             continue
@@ -752,7 +885,8 @@ def _volume_after(_cmd):
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip().splitlines()[0])
-        print("usage: tvctl serve | state | apps | scan [--save] | app <name> | <key>...")
+        print("usage: tvctl serve | state | apps | scan [--save] | app <name>"
+              " | hold <key> [secs] | <key>...")
         print("keys:  " + " ".join(sorted(KEYS)))
         print("apps:  " + " ".join(a["key"] for a in load_apps()))
         return 0
@@ -761,6 +895,22 @@ def main(argv):
         return 0
     if argv[0] == "state":
         emit(state_payload())
+        return 0
+    if argv[0] == "hold":
+        # tvctl hold voldown 1.5 -- the CLI equivalent of holding the button.
+        if len(argv) < 2 or argv[1].lower() not in KEYS:
+            print("usage: tvctl hold <key> [seconds]", file=sys.stderr)
+            return 2
+        name = argv[1].lower()
+        seconds = float(argv[2]) if len(argv) > 2 else 1.0
+        ws, _ = connect()
+        try:
+            send_key(ws, name, "Press")
+            time.sleep(seconds)
+            send_key(ws, name, "Release")
+            time.sleep(0.25)
+        finally:
+            ws.close()
         return 0
     if argv[0] == "apps":
         # Re-checks each id against the TV; the way to find ids for another set.
