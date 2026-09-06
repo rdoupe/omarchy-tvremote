@@ -1,0 +1,794 @@
+#!/usr/bin/env python3
+"""Backend for the Samsung TV remote bar widget.
+
+The TV (a Tizen set with TokenAuthSupport) takes remote keys over a WebSocket
+on port 8002 -- TLS with a self-signed cert, plain RFC6455 frames, short JSON
+text messages. That is small enough to speak with the stdlib alone, which is
+why there is no websocket-client dependency here: the widget must work on a
+stock Arch/Omarchy box with nothing pip-installed.
+
+Two modes:
+
+  tvctl <key>...   one-shot; connects, sends, exits. Handy from a keybinding.
+  tvctl serve      reads key names on stdin, one per line, and holds the
+                   socket open. The panel uses this so a keypress costs one
+                   small frame instead of a fresh TCP+TLS handshake.
+
+Volume and mute are NOT available on the remote channel -- it only sends key
+clicks, and the TV never reports back what the volume became. Those are read
+separately over UPnP RenderingControl on port 9197, which is what lets the
+panel show a real number instead of a guess.
+"""
+import base64
+import hashlib
+import json
+import os
+import re
+import socket
+import ssl
+import struct
+import sys
+import threading
+import time
+import urllib.request
+
+HOST = os.environ.get("TV_HOST", "192.168.100.59")
+WS_PORT = 8002
+API_PORT = 8001
+UPNP_PORT = 9197
+CLIENT_NAME = os.environ.get("TV_NAME", "Omarchy")
+STATE_DIR = os.path.expanduser("~/.local/state/omarchy")
+TOKEN_FILE = os.path.join(STATE_DIR, "tvremote-token")
+
+# Names the panel and the CLI use -> Tizen key codes.
+KEYS = {
+    "up": "KEY_UP",
+    "down": "KEY_DOWN",
+    "left": "KEY_LEFT",
+    "right": "KEY_RIGHT",
+    "enter": "KEY_ENTER",
+    "back": "KEY_RETURN",
+    "volup": "KEY_VOLUP",
+    "voldown": "KEY_VOLDOWN",
+    "mute": "KEY_MUTE",
+    "home": "KEY_HOME",
+    "power": "KEY_POWER",
+}
+VOLUME_KEYS = ("volup", "voldown", "mute")
+
+# Streaming apps live in a config file, not in this source, because the Tizen
+# application id is per-model and per-firmware: the widely-quoted Netflix id
+# 11101200001 is a 404 on this set while 3201907018807 works. `tvctl scan`
+# rewrites the file from what the TV actually answers to.
+APPS_FILE = os.path.expanduser(
+    os.environ.get("TV_APPS_FILE", "~/.config/omarchy/tvremote-apps.json"))
+
+# Written out on first run. Order matters: it is the order the panel lays the
+# apps out in, and the first one gets the large primary tile.
+# "show" is what separates a tile from a discovery: a scan turns up every app
+# on the TV, but only the shown ones get a tile, and the rest sit behind
+# "more" until pinned. Otherwise the first scan buries the four apps that
+# matter under Internet, Gallery and Xbox.
+DEFAULT_APPS = [
+    {"key": "youtube", "name": "YouTube", "appId": "111299001912", "color": "#ff0033", "show": True},
+    {"key": "netflix", "name": "Netflix", "appId": "3201907018807", "color": "#e50914", "show": True},
+    {"key": "prime", "name": "Prime Video", "appId": "3201910019365", "color": "#00a8e1", "show": True},
+    {"key": "spotify", "name": "Spotify", "appId": "3201606009684", "color": "#1db954", "show": True},
+]
+
+# Probed by `tvctl scan`. This TV answers no enumeration request -- there is no
+# /api/v2/applications/ listing and ed.installedApp.get never replies -- so
+# discovering what is installed means asking about ids one at a time. Anything
+# not in this catalog can still be added to the config file by hand.
+CANDIDATE_APPS = {
+    # Verified against this TV
+    "111299001912": "YouTube",
+    "3201907018807": "Netflix",
+    "3201910019365": "Prime Video",
+    "3201606009684": "Spotify",
+    # Alternate ids for the same apps on other model years. Samsung reissued
+    # ids across firmware generations, so both are probed and whichever the
+    # TV answers to wins -- 11101200001 is the classic Netflix id and is a
+    # 404 here, which is exactly why the list is probed rather than trusted.
+    "11101200001": "Netflix",
+    "3201512006785": "Prime Video",
+    "3201611010983": "YouTube Kids",
+    "3201707014489": "YouTube TV",
+    # Video
+    "3201901017640": "Disney+",
+    "3202009021709": "Disney+",
+    "3202204027038": "Disney+",
+    "3201807016597": "Apple TV",
+    "3201512006963": "Plex",
+    "3201606009872": "Emby",
+    "3201601007625": "Hulu",
+    "3201601007230": "HBO Max",
+    "3202301029760": "Max",
+    "3201706012478": "HBO GO",
+    "3202203026841": "Twitch",
+    "3201710014981": "Paramount+",
+    "3202110025305": "Paramount+",
+    "3202006020991": "Peacock",
+    "3201504001965": "Tubi",
+    "3201808016802": "Pluto TV",
+    "3201803015944": "Discovery+",
+    "3201811017337": "AMC",
+    "3201806016390": "DAZN",
+    "3201902017887": "Shudder",
+    "3201511006428": "Rakuten TV",
+    "3201602007756": "Red Bull TV",
+    "3201505002690": "CHILI",
+    "3201601007250": "Google Play Movies",
+    "111012010001": "VUDU",
+    "3202008021577": "TikTok",
+    # Canada (this set reports countryCode CA)
+    "3201506003486": "CTV",
+    "3201506003488": "Crave",
+    "111399000741": "The Weather Network",
+    # Music
+    "3201908019041": "Apple Music",
+    "3201608010191": "Deezer",
+    "3201805016367": "TIDAL",
+    "3201710014874": "Amazon Music",
+    "121299000101": "TuneIn",
+    "111399002220": "SiriusXM",
+    # Sport
+    "3201708014618": "ESPN",
+    "3201603008210": "MLB",
+    # Gaming and utility
+    "3201702011851": "Steam Link",
+    "3202203026799": "Xbox",
+    "3201907018784": "Internet",
+    "3202010022079": "Internet",
+    "3201710015016": "SmartThings",
+    "3201910019378": "SmartThings",
+    "3201710015037": "Gallery",
+    # UK
+    "3201909019175": "BritBox",
+    "3201601007670": "BBC iPlayer",
+}
+
+
+def default_color(name):
+    # Brand colours, lightened where the real one would disappear against a
+    # dark panel -- Disney's navy is unreadable at tile size.
+    palette = {
+        "YouTube": "#ff0033", "Netflix": "#e50914", "Prime Video": "#00a8e1",
+        "Spotify": "#1db954", "Disney+": "#3fa9f5", "Apple TV": "#cfcfcf",
+        "Plex": "#e5a00d", "Twitch": "#9146ff", "Crave": "#00b3e3",
+        "Tubi": "#fbc02d", "Pluto TV": "#ffe000", "Xbox": "#52b043",
+        "Apple Music": "#fa586a", "TIDAL": "#00ffff", "Deezer": "#ef5466",
+        "Hulu": "#1ce783", "Max": "#7b5cf0", "HBO Max": "#7b5cf0",
+        "Paramount+": "#0064ff", "Peacock": "#f5c518", "Discovery+": "#2175d9",
+        "Crunchyroll": "#f47521", "BritBox": "#0b6cff", "CTV": "#00a0df",
+    }
+    return palette.get(name, "#8a8f98")
+
+
+def load_apps():
+    """Configured apps, seeding the file from DEFAULT_APPS on first run."""
+    try:
+        with open(APPS_FILE) as f:
+            data = json.load(f)
+        apps = data.get("apps") if isinstance(data, dict) else data
+        cleaned = []
+        for a in apps or []:
+            if not isinstance(a, dict) or not a.get("appId"):
+                continue
+            name = str(a.get("name") or a["appId"])
+            cleaned.append({
+                "key": str(a.get("key") or re.sub(r"[^a-z0-9]+", "", name.lower()) or a["appId"]),
+                "name": name,
+                "appId": str(a["appId"]),
+                "color": str(a.get("color") or default_color(name)),
+                "show": a.get("show", True) is not False,
+            })
+        if cleaned:
+            return cleaned
+    except FileNotFoundError:
+        save_apps(DEFAULT_APPS)
+    except Exception:
+        pass  # a corrupt or hand-edited file must not break the remote
+    return [dict(a) for a in DEFAULT_APPS]
+
+
+def save_apps(apps):
+    os.makedirs(os.path.dirname(APPS_FILE), exist_ok=True)
+    tmp = APPS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"apps": apps}, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, APPS_FILE)
+
+
+def app_by_key(key):
+    for a in load_apps():
+        if a["key"] == key:
+            return a
+    return None
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+# ---------------------------------------------------------------- websocket
+
+
+class WebSocket:
+    """Minimal RFC6455 client. Text frames only; that is all the TV sends."""
+
+    def __init__(self, host, port, path, timeout):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False          # the TV serves a self-signed cert
+        ctx.verify_mode = ssl.CERT_NONE     # keyed to its own UUID, not a CA
+        sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock = ctx.wrap_socket(sock, server_hostname=host)
+        self.sock.settimeout(timeout)
+        self.send_lock = threading.Lock()
+        self.buf = b""
+
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode())
+
+        while b"\r\n\r\n" not in self.buf:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("closed during handshake")
+            self.buf += chunk
+        head, self.buf = self.buf.split(b"\r\n\r\n", 1)
+        status = head.split(b"\r\n", 1)[0].decode(errors="replace")
+        if "101" not in status:
+            raise ConnectionError(f"handshake refused: {status}")
+        expect = base64.b64encode(hashlib.sha1(
+            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        if expect.lower().encode() not in head.lower():
+            raise ConnectionError("bad Sec-WebSocket-Accept")
+
+    def _read(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("connection closed")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def _frame(self, opcode, payload):
+        head = bytearray([0x80 | opcode])
+        n = len(payload)
+        if n < 126:
+            head.append(0x80 | n)
+        elif n < 65536:
+            head.append(0x80 | 126)
+            head += struct.pack(">H", n)
+        else:
+            head.append(0x80 | 127)
+            head += struct.pack(">Q", n)
+        mask = os.urandom(4)
+        head += mask
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        with self.send_lock:
+            self.sock.sendall(bytes(head) + masked)
+
+    def send(self, text):
+        self._frame(0x1, text.encode())
+
+    def recv(self):
+        """Next text message. Answers pings; the TV hangs up otherwise."""
+        while True:
+            b0, b1 = self._read(2)
+            opcode = b0 & 0x0F
+            n = b1 & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self._read(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._read(8))[0]
+            data = self._read(n) if n else b""
+            if opcode == 0x8:
+                raise ConnectionError("closed by TV")
+            if opcode == 0x9:
+                # Unanswered pings get us dropped with reason "notack".
+                self._frame(0xA, data)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode in (0x1, 0x2):
+                return data.decode(errors="replace")
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def load_token():
+    try:
+        with open(TOKEN_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_token(token):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        f.write(token)
+    os.chmod(TOKEN_FILE, 0o600)
+
+
+def connect(timeout=8):
+    """Open the remote-control channel. Returns (socket, newly_paired).
+
+    Without a saved token the TV puts an Allow/Deny prompt on screen and says
+    nothing until someone answers it with the physical remote, so the first
+    connect gets a long read timeout and every later one does not.
+    """
+    token = load_token()
+    path = ("/api/v2/channels/samsung.remote.control?name="
+            + base64.b64encode(CLIENT_NAME.encode()).decode())
+    if token:
+        path += "&token=" + token
+    ws = WebSocket(HOST, WS_PORT, path, timeout)
+    ws.sock.settimeout(timeout if token else 45)
+    try:
+        while True:
+            msg = json.loads(ws.recv())
+            event = msg.get("event")
+            if event == "ms.channel.connect":
+                issued = str((msg.get("data") or {}).get("token") or "")
+                ws.sock.settimeout(timeout)
+                if issued and issued != token:
+                    save_token(issued)
+                    return ws, True
+                return ws, False
+            if event in ("ms.channel.unauthorized", "ms.error"):
+                raise PermissionError("TV denied the connection: " + json.dumps(msg))
+    except Exception:
+        ws.close()
+        raise
+
+
+def send_key(ws, name):
+    ws.send(json.dumps({
+        "method": "ms.remote.control",
+        "params": {
+            "Cmd": "Click",
+            "DataOfCmd": KEYS[name],
+            "Option": "false",
+            "TypeOfRemote": "SendRemoteKey",
+        },
+    }))
+
+
+# --------------------------------------------------------------- TV queries
+
+
+def soap(action, body, timeout=3):
+    url = f"http://{HOST}:{UPNP_PORT}/upnp/control/RenderingControl1"
+    service = "urn:schemas-upnp-org:service:RenderingControl:1"
+    envelope = (
+        '<?xml version="1.0"?>'
+        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"'
+        ' s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+        f'<u:{action} xmlns:u="{service}"><InstanceID>0</InstanceID>'
+        f'<Channel>Master</Channel>{body}</u:{action}>'
+        "</s:Body></s:Envelope>"
+    )
+    req = urllib.request.Request(url, data=envelope.encode(), headers={
+        "Content-Type": 'text/xml; charset="utf-8"',
+        "SOAPACTION": f'"{service}#{action}"',
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode(errors="replace")
+
+
+def read_volume(timeout=3):
+    """(volume, muted); either is None when the TV does not answer."""
+    volume = muted = None
+    try:
+        m = re.search(r"<CurrentVolume>(\d+)", soap("GetVolume", "", timeout))
+        if m:
+            volume = int(m.group(1))
+    except Exception:
+        pass
+    try:
+        m = re.search(r"<CurrentMute>(\d+)", soap("GetMute", "", timeout))
+        if m:
+            muted = m.group(1) == "1"
+    except Exception:
+        pass
+    return volume, muted
+
+
+def read_device(timeout=3):
+    try:
+        with urllib.request.urlopen(
+                f"http://{HOST}:{API_PORT}/api/v2/", timeout=timeout) as resp:
+            device = json.load(resp).get("device") or {}
+    except Exception:
+        return None
+    name = str(device.get("name") or "TV")
+    # The TV HTML-escapes its own name, so '55" QLED' arrives as 55&quot; QLED.
+    name = name.replace("&quot;", '"').replace("&amp;", "&").replace("&apos;", "'")
+    return {"name": name, "model": device.get("modelName", ""),
+            "power": device.get("PowerState", "unknown")}
+
+
+def app_status(app_id, timeout=3):
+    try:
+        with urllib.request.urlopen(
+                f"http://{HOST}:{API_PORT}/api/v2/applications/{app_id}",
+                timeout=timeout) as resp:
+            return json.load(resp)
+    except Exception:
+        return None
+
+
+def launch_app(key):
+    """Bring a streaming app to the foreground.
+
+    This is a REST POST rather than a remote key: the remote channel can only
+    click buttons, so reaching an app through it would mean guessing at the
+    home screen's layout.
+    """
+    app = app_by_key(key)
+    if app is None:
+        raise KeyError(key)
+    req = urllib.request.Request(
+        f"http://{HOST}:{API_PORT}/api/v2/applications/{app['appId']}", method="POST")
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return resp.status == 200
+
+
+def foreground_app(timeout=3):
+    """Which of our apps is on screen, if any.
+
+    An app that has been used stays `running` in the background long after it
+    left the screen, so `visible` is the only field that answers this.
+    """
+    for app in load_apps():
+        info = app_status(app["appId"], timeout)
+        if info and info.get("visible"):
+            return app["key"]
+    return ""
+
+
+def short_name(name):
+    """App store names run long ("Tubi - Free Movies & TV"); tiles do not."""
+    name = re.split(r"\s*[-–:|]\s+", name, maxsplit=1)[0].strip()
+    return name if len(name) <= 18 else name[:17].rstrip() + "…"
+
+
+def scan_apps(timeout=3):
+    """Probe every candidate id and return the ones this TV answers to.
+
+    The probes run in parallel because a missing app costs a full timeout and
+    a serial sweep of the catalog would take minutes.
+    """
+    known = {a["appId"]: a for a in load_apps()}
+    results = {}
+    lock = threading.Lock()
+
+    def probe(app_id, fallback_name):
+        info = app_status(app_id, timeout)
+        if not info:
+            return
+        # The TV's own name can be a mouthful ("Spotify - Music and Podcasts"),
+        # so a name already in the config wins -- a scan should not undo the
+        # label the user is reading in the panel.
+        name = short_name(str(info.get("name") or fallback_name))
+        if app_id in known:
+            name = known[app_id]["name"]
+        with lock:
+            results[app_id] = {
+                "key": known[app_id]["key"] if app_id in known
+                       else re.sub(r"[^a-z0-9]+", "", name.lower()) or app_id,
+                "name": name,
+                "appId": app_id,
+                "color": known[app_id]["color"] if app_id in known
+                         else default_color(name),
+                # A newly discovered app stays behind "more" until pinned.
+                "show": known[app_id]["show"] if app_id in known else False,
+            }
+
+    catalog = dict(CANDIDATE_APPS)
+    for app in load_apps():           # never lose a hand-added id to a scan
+        catalog.setdefault(app["appId"], app["name"])
+
+    threads = [threading.Thread(target=probe, args=(i, n), daemon=True)
+               for i, n in catalog.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout + 3)
+
+    # Configured order first, then anything new the scan turned up.
+    ordered = [results[a["appId"]] for a in load_apps() if a["appId"] in results]
+    seen = {a["appId"] for a in ordered}
+    ordered += [v for k, v in results.items() if k not in seen]
+    return ordered
+
+
+def merge_apps(found):
+    """Scan results become the new config, keeping existing keys and colors."""
+    return [dict(a) for a in found]
+
+
+def state_payload(with_volume=True):
+    device = read_device()
+    payload = {
+        "type": "state",
+        "reachable": device is not None,
+        "paired": bool(load_token()),
+        "name": device["name"] if device else "TV",
+        "model": device["model"] if device else "",
+        "power": device["power"] if device else "off",
+    }
+    if with_volume and device is not None:
+        volume, muted = read_volume()
+        payload["volume"] = -1 if volume is None else volume
+        payload["muted"] = bool(muted)
+        payload["app"] = foreground_app()
+    else:
+        payload["volume"] = -1
+        payload["muted"] = False
+        payload["app"] = ""
+    return payload
+
+
+# ------------------------------------------------------------------- serve
+
+
+class Server:
+    """Holds one remote-control socket open and feeds stdin keys into it."""
+
+    def __init__(self):
+        self.ws = None
+        self.lock = threading.Lock()
+        self.reader = None
+        self.generation = 0
+
+    def _drain(self, ws, generation):
+        """Own all reads: pings must be answered even while nothing is sent."""
+        try:
+            while True:
+                ws.recv()
+        except Exception:
+            pass
+        with self.lock:
+            if self.generation == generation and self.ws is ws:
+                self.ws = None
+                emit({"type": "disconnected"})
+        ws.close()
+
+    def ensure(self):
+        with self.lock:
+            if self.ws is not None:
+                return self.ws
+        ws, newly_paired = connect()
+        with self.lock:
+            self.generation += 1
+            self.ws = ws
+            generation = self.generation
+        self.reader = threading.Thread(
+            target=self._drain, args=(ws, generation), daemon=True)
+        self.reader.start()
+        emit({"type": "connected", "paired_now": newly_paired})
+        return ws
+
+    def key(self, name):
+        """Send a key, retrying once: an idle socket may have been dropped."""
+        for attempt in (0, 1):
+            try:
+                send_key(self.ensure(), name)
+                return True
+            except Exception as exc:
+                with self.lock:
+                    stale = self.ws
+                    self.ws = None
+                    self.generation += 1
+                if stale is not None:
+                    stale.close()
+                if attempt:
+                    emit({"type": "error", "key": name,
+                          "msg": f"{type(exc).__name__}: {exc}"})
+                    return False
+        return False
+
+    def close(self):
+        with self.lock:
+            ws, self.ws = self.ws, None
+            self.generation += 1
+        if ws is not None:
+            ws.close()
+
+
+def _warm(server):
+    """Open the socket before any key is pressed.
+
+    The panel starts this child when its popup opens, so the handshake
+    overlaps with the user reaching for a button instead of delaying the
+    first press -- and the panel can say "connected" truthfully.
+    """
+    try:
+        server.ensure()
+    except Exception as exc:
+        emit({"type": "error", "msg": f"{type(exc).__name__}: {exc}"})
+
+
+def serve():
+    server = Server()
+    # Report reachability immediately: the panel opens on this, and a TV that
+    # is off should say so rather than look like a hung connection.
+    emit({"type": "apps", "apps": load_apps()})
+    threading.Thread(target=lambda: emit(state_payload()), daemon=True).start()
+    threading.Thread(target=_warm, args=(server,), daemon=True).start()
+    try:
+        for line in sys.stdin:
+            cmd = line.strip().lower()
+            if not cmd:
+                continue
+            if cmd == "quit":
+                break
+            if cmd == "state":
+                threading.Thread(
+                    target=lambda: emit(state_payload()), daemon=True).start()
+                continue
+            if cmd == "apps":
+                emit({"type": "apps", "apps": load_apps()})
+                continue
+            if cmd.startswith("pin:"):
+                if toggle_pin(cmd[4:]):
+                    emit({"type": "apps", "apps": load_apps()})
+                else:
+                    emit({"type": "error", "msg": f"unknown app: {cmd[4:]}"})
+                continue
+            if cmd == "scan":
+                threading.Thread(target=_scan_and_report, daemon=True).start()
+                continue
+            if cmd.startswith("app:"):
+                key = cmd[4:]
+                if app_by_key(key) is None:
+                    emit({"type": "error", "msg": f"unknown app: {key}"})
+                else:
+                    threading.Thread(target=_launch_and_report,
+                                     args=(key,), daemon=True).start()
+                continue
+            if cmd not in KEYS:
+                emit({"type": "error", "msg": f"unknown key: {cmd}"})
+                continue
+            if server.key(cmd):
+                emit({"type": "ack", "key": cmd})
+                if cmd in VOLUME_KEYS:
+                    # The remote channel never reports the resulting volume;
+                    # give the TV a moment to apply the key, then read it.
+                    threading.Thread(target=_volume_after,
+                                     args=(cmd,), daemon=True).start()
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+    finally:
+        server.close()
+
+
+def toggle_pin(key):
+    apps = load_apps()
+    hit = False
+    for a in apps:
+        if a["key"] == key:
+            a["show"] = not a["show"]
+            hit = True
+    if hit:
+        save_apps(apps)
+    return hit
+
+
+def _scan_and_report():
+    emit({"type": "scanning"})
+    try:
+        found = scan_apps()
+    except Exception as exc:
+        emit({"type": "error", "msg": f"scan: {type(exc).__name__}"})
+        return
+    save_apps(merge_apps(found))
+    emit({"type": "apps", "apps": load_apps(), "scanned": True})
+
+
+def _launch_and_report(key):
+    try:
+        launch_app(key)
+    except Exception as exc:
+        emit({"type": "error", "msg": f"{key}: {type(exc).__name__}"})
+        return
+    emit({"type": "ack", "key": "app:" + key})
+    # The TV reports `visible` only once the app has actually come up.
+    time.sleep(1.2)
+    emit({"type": "app", "app": foreground_app()})
+
+
+def _volume_after(_cmd):
+    time.sleep(0.35)
+    volume, muted = read_volume()
+    if volume is not None:
+        emit({"type": "volume", "volume": volume, "muted": bool(muted)})
+
+
+# --------------------------------------------------------------------- CLI
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip().splitlines()[0])
+        print("usage: tvctl serve | state | apps | scan [--save] | app <name> | <key>...")
+        print("keys:  " + " ".join(sorted(KEYS)))
+        print("apps:  " + " ".join(a["key"] for a in load_apps()))
+        return 0
+    if argv[0] == "serve":
+        serve()
+        return 0
+    if argv[0] == "state":
+        emit(state_payload())
+        return 0
+    if argv[0] == "apps":
+        # Re-checks each id against the TV; the way to find ids for another set.
+        for app in load_apps():
+            info = app_status(app["appId"])
+            if info is None:
+                print(f"{app['key']:<9} {app['appId']:<15} {app['name']}  NOT INSTALLED")
+            else:
+                print(f"{app['key']:<9} {app['appId']:<15} {info.get('name')}"
+                      f"  running={info.get('running')} visible={info.get('visible')}")
+        print(f"\nconfig: {APPS_FILE}")
+        return 0
+    if argv[0] == "scan":
+        found = scan_apps()
+        for app in found:
+            print(f"{app['key']:<12} {app['appId']:<15} {app['name']}")
+        if "--save" in argv:
+            merged = merge_apps(found)
+            save_apps(merged)
+            print(f"\nsaved {len(merged)} apps to {APPS_FILE}")
+        else:
+            print(f"\n{len(found)} installed; re-run with --save to write {APPS_FILE}")
+        return 0
+    if argv[0] == "app":
+        if len(argv) < 2 or app_by_key(argv[1].lower()) is None:
+            print("usage: tvctl app "
+                  + "|".join(a["key"] for a in load_apps()), file=sys.stderr)
+            return 2
+        launch_app(argv[1].lower())
+        return 0
+
+    unknown = [a for a in argv if a.lower() not in KEYS]
+    if unknown:
+        print("unknown key(s): " + " ".join(unknown), file=sys.stderr)
+        return 2
+    ws, newly_paired = connect()
+    if newly_paired:
+        print("paired with the TV; token saved", file=sys.stderr)
+    try:
+        for i, name in enumerate(argv):
+            if i:
+                time.sleep(0.15)
+            send_key(ws, name.lower())
+        time.sleep(0.25)  # let the last frame flush before the socket drops
+    finally:
+        ws.close()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as exc:
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
