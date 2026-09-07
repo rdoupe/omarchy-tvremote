@@ -5,7 +5,7 @@
   "version": "1.3.0",
   "author": "Ryan Doupe",
   "license": "MIT",
-  "description": "A Samsung smart TV's remote in the bar: volume, D-pad, OK and Back, app tiles for whatever streaming apps the TV has installed, hold-to-repeat that ramps like the real remote, and wake-on-LAN that reopens the app you were last watching. Finds the TV on the network by itself. Needs nothing but Python 3; the TV shows a one-time Allow prompt on first use.",
+  "description": "Control a Samsung TV from the bar. Arrow keys to navigate, backspace and enter. Keys 1-9 launch the apps your TV actually has: YouTube, Netflix, Prime Video and whatever else it finds. One connection stays open so presses land instantly, and holding a key repeats like the real remote. Volume with a live readout, or scroll the bar icon. Wakes the TV over the network and reopens what you were watching. Finds your TV automatically, no IP to enter. Samsung Tizen TVs, 2016 and newer. Needs only Python 3.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Samsung TV Remote",
-    "description": "Volume, arrows, OK and Back for a Samsung smart TV, plus app launch tiles. Scroll the icon for volume; arrow keys drive the TV while the popup is open.",
+    "description": "Arrow keys, enter and backspace drive the TV, 1-9 launch its apps. Instant: one connection stays open. Volume, hold-to-repeat, wake-on-LAN.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
