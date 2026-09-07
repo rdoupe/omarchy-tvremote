@@ -215,8 +215,15 @@ def load_apps():
             if not isinstance(a, dict) or not a.get("appId"):
                 continue
             name = str(a.get("name") or a["appId"])
+            # Sanitised whether supplied or generated. These keys are sent
+            # to the helper over a line-oriented stdin protocol, so an
+            # embedded newline in a hand-edited config would split one
+            # command into two.
+            raw_key = str(a.get("key") or name.lower())
+            key = re.sub(r"[^a-z0-9]+", "", raw_key) or re.sub(
+                r"[^a-z0-9]+", "", str(a["appId"]))
             cleaned.append({
-                "key": str(a.get("key") or re.sub(r"[^a-z0-9]+", "", name.lower()) or a["appId"]),
+                "key": key,
                 "name": name,
                 "appId": str(a["appId"]),
                 "color": str(a.get("color") or default_color(name)),
@@ -287,6 +294,8 @@ class WebSocket:
             if not chunk:
                 raise ConnectionError("closed during handshake")
             self.buf += chunk
+            if len(self.buf) > MAX_FRAME:
+                raise ConnectionError("handshake headers too large")
         head, self.buf = self.buf.split(b"\r\n\r\n", 1)
         status = head.split(b"\r\n", 1)[0].decode(errors="replace")
         if "101" not in status:
@@ -367,10 +376,12 @@ def load_token():
 
 
 def save_token(token):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(TOKEN_FILE, "w") as f:
+    os.makedirs(STATE_DIR, exist_ok=True, mode=0o700)
+    # Created 0600 rather than chmod'd afterwards: writing first leaves the
+    # token briefly readable under the default umask.
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(token)
-    os.chmod(TOKEN_FILE, 0o600)
 
 
 def channel_endpoints():
@@ -454,6 +465,12 @@ def send_key(ws, name, cmd="Click"):
 # --------------------------------------------------------------- TV queries
 
 
+def valid_ipv4(text):
+    parts = str(text).split(".")
+    return (len(parts) == 4 and all(p.isdigit() and len(p) <= 3
+            and 0 <= int(p) <= 255 for p in parts))
+
+
 def local_ipv4():
     """This machine's LAN address, without sending anything.
 
@@ -491,12 +508,21 @@ def support_map(api_data):
 
 def identify(ip, timeout=2):
     """Return the device dict if `ip` is a Samsung TV, else None."""
+    # Everything about the reply is parsed inside the guard: any host on the
+    # LAN can answer this, and valid JSON that simply is not an object ("ok",
+    # [], 42) would otherwise raise past the caller. That path is reached
+    # from the TV picker on the daemon's main loop, where it would kill the
+    # process outright.
     try:
         data = fetch_json(f"http://{ip}:{API_PORT}/api/v2/", timeout)
+        if not isinstance(data, dict):
+            return None
+        device = data.get("device")
+        if not isinstance(device, dict):
+            return None
+        if "samsung" not in str(device.get("type", "")).lower():
+            return None
     except Exception:
-        return None
-    device = data.get("device") or {}
-    if "samsung" not in str(device.get("type", "")).lower():
         return None
     name = str(device.get("name") or "TV")
     name = name.replace("&quot;", '"').replace("&amp;", "&").replace("&apos;", "'")
@@ -847,7 +873,7 @@ def foreground_app(timeout=3):
 
     def probe(app):
         info = app_status(app["appId"], timeout)
-        if info and info.get("visible"):
+        if isinstance(info, dict) and info.get("visible"):
             with lock:
                 found[0] = app["key"]
 
@@ -882,7 +908,7 @@ def scan_apps(timeout=3):
 
     def probe(app_id, fallback_name):
         info = app_status(app_id, timeout)
-        if not info:
+        if not isinstance(info, dict):
             return
         # The TV's own name can be a mouthful ("Spotify - Music and Podcasts"),
         # so a name already in the config wins -- a scan should not undo the
@@ -1010,8 +1036,10 @@ class Server:
     def key(self, name, cmd="Click"):
         """Send a key, retrying once: an idle socket may have been dropped."""
         for attempt in (0, 1):
+            ws = None
             try:
-                send_key(self.ensure(), name, cmd)
+                ws = self.ensure()
+                send_key(ws, name, cmd)
                 if cmd == "Press":
                     self.held.add(name)
                     HELD_KEYS.add(name)
@@ -1020,10 +1048,17 @@ class Server:
                     HELD_KEYS.discard(name)
                 return True
             except Exception as exc:
+                # Only retire the socket that actually failed. A wake runs
+                # server.key() from its own thread while the stdin loop may
+                # have already reconnected, and closing whatever happens to
+                # be current would tear down a healthy new connection --
+                # the same identity check _drain() already makes.
+                stale = None
                 with self.lock:
-                    stale = self.ws
-                    self.ws = None
-                    self.generation += 1
+                    if ws is not None and self.ws is ws:
+                        stale = ws
+                        self.ws = None
+                        self.generation += 1
                 if stale is not None:
                     stale.close()
                 if attempt:
@@ -1069,6 +1104,109 @@ def _warm(server):
             emit({"type": "error", "msg": f"{type(exc).__name__}: {exc}"})
 
 
+def dispatch(cmd, server, held_since, pressed_at):
+    """Handle one stdin command. Returns True, or "quit" to stop.
+
+    Split out of serve() so the loop can wrap it: this daemon parses
+    replies from a closed appliance and from whatever else answers on
+    the LAN, and one unforeseen shape should degrade to an error line
+    rather than kill a widget the user is mid-keypress on.
+    """
+    if cmd == "quit":
+        return "quit"
+    if cmd == "state":
+        threading.Thread(
+            target=lambda: emit(state_payload()), daemon=True).start()
+        return True
+    if cmd.startswith("pick:"):
+        ip = cmd[5:]
+        if not valid_ipv4(ip):
+            emit({"type": "error", "msg": f"not an address: {ip}"})
+            return True
+        info = choose_host(ip)
+        emit({"type": "picked", "ip": ip,
+              "name": info["name"] if info else ip})
+        emit({"type": "apps", "apps": load_apps()})
+        threading.Thread(
+            target=lambda: emit(state_payload()), daemon=True).start()
+        threading.Thread(target=_warm, args=(server,), daemon=True).start()
+        return True
+    if cmd == "rediscover":
+        threading.Thread(target=_rediscover, daemon=True).start()
+        return True
+    if cmd == "reconnect":
+        threading.Thread(target=_warm, args=(server,), daemon=True).start()
+        return True
+    if cmd == "wake" or cmd.startswith("wake:"):
+        # "wake:youtube" means the user clicked an app while the TV
+        # was off: turn it on, then open that app rather than
+        # whatever happened to be on screen last.
+        target = cmd[5:] if cmd.startswith("wake:") else ""
+        if target and app_by_key(target) is None:
+            emit({"type": "error", "msg": f"unknown app: {target}"})
+            return True
+        threading.Thread(target=_wake_and_watch,
+                         args=(server, target), daemon=True).start()
+        return True
+    if cmd == "apps":
+        emit({"type": "apps", "apps": load_apps()})
+        return True
+    if cmd.startswith("pin:"):
+        if toggle_pin(cmd[4:]):
+            emit({"type": "apps", "apps": load_apps()})
+        else:
+            emit({"type": "error", "msg": f"unknown app: {cmd[4:]}"})
+        return True
+    if cmd == "scan":
+        threading.Thread(target=_scan_and_report, daemon=True).start()
+        return True
+    if cmd.startswith("press:") or cmd.startswith("release:"):
+        verb, _, name = cmd.partition(":")
+        if name not in KEYS:
+            emit({"type": "error", "msg": f"unknown key: {name}"})
+            return True
+        now = time.monotonic()
+        if verb == "press":
+            # Stamped before the send, which can block: the very first
+            # press waits on the opening handshake, and without this
+            # the release that follows would cut a real one-second
+            # hold down to the few milliseconds left after connecting.
+            held_since[name] = now
+            if server.key(name, "Press"):
+                pressed_at[name] = time.monotonic()
+                emit({"type": "ack", "key": cmd})
+        else:
+            intended = now - held_since.pop(name, now)
+            already = now - pressed_at.pop(name, now)
+            shortfall = intended - already
+            if shortfall > 0.05:
+                time.sleep(min(shortfall, 5.0))
+            if server.key(name, "Release"):
+                emit({"type": "ack", "key": cmd})
+                if name in VOLUME_KEYS:
+                    threading.Thread(target=_volume_after,
+                                     args=(name,), daemon=True).start()
+        return True
+    if cmd.startswith("app:"):
+        key = cmd[4:]
+        if app_by_key(key) is None:
+            emit({"type": "error", "msg": f"unknown app: {key}"})
+        else:
+            threading.Thread(target=_launch_and_report,
+                             args=(key,), daemon=True).start()
+        return True
+    if cmd not in KEYS:
+        emit({"type": "error", "msg": f"unknown key: {cmd}"})
+        return True
+    if server.key(cmd):
+        emit({"type": "ack", "key": cmd})
+        if cmd in VOLUME_KEYS:
+            # The remote channel never reports the resulting volume;
+            # give the TV a moment to apply the key, then read it.
+            threading.Thread(target=_volume_after,
+                             args=(cmd,), daemon=True).start()
+
+
 def serve():
     if not HOST:
         # Either nothing was found, or several were and the choice is the
@@ -1106,99 +1244,18 @@ def serve():
             cmd = line.strip().lower()
             if not cmd:
                 continue
-            if cmd == "quit":
+            try:
+                handled = dispatch(cmd, server, held_since, pressed_at)
+            except Exception as exc:
+                # This daemon parses replies from an appliance and from
+                # whatever else answers on the LAN. One unforeseen shape
+                # should degrade to an error line, never kill the widget.
+                emit({"type": "error", "msg": f"{type(exc).__name__}: {exc}"})
+                continue
+            if handled == "quit":
                 break
-            if cmd == "state":
-                threading.Thread(
-                    target=lambda: emit(state_payload()), daemon=True).start()
+            if handled:
                 continue
-            if cmd.startswith("pick:"):
-                ip = cmd[5:]
-                if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
-                    emit({"type": "error", "msg": f"not an address: {ip}"})
-                    continue
-                info = choose_host(ip)
-                emit({"type": "picked", "ip": ip,
-                      "name": info["name"] if info else ip})
-                emit({"type": "apps", "apps": load_apps()})
-                threading.Thread(
-                    target=lambda: emit(state_payload()), daemon=True).start()
-                threading.Thread(target=_warm, args=(server,), daemon=True).start()
-                continue
-            if cmd == "rediscover":
-                threading.Thread(target=_rediscover, daemon=True).start()
-                continue
-            if cmd == "reconnect":
-                threading.Thread(target=_warm, args=(server,), daemon=True).start()
-                continue
-            if cmd == "wake" or cmd.startswith("wake:"):
-                # "wake:youtube" means the user clicked an app while the TV
-                # was off: turn it on, then open that app rather than
-                # whatever happened to be on screen last.
-                target = cmd[5:] if cmd.startswith("wake:") else ""
-                if target and app_by_key(target) is None:
-                    emit({"type": "error", "msg": f"unknown app: {target}"})
-                    continue
-                threading.Thread(target=_wake_and_watch,
-                                 args=(server, target), daemon=True).start()
-                continue
-            if cmd == "apps":
-                emit({"type": "apps", "apps": load_apps()})
-                continue
-            if cmd.startswith("pin:"):
-                if toggle_pin(cmd[4:]):
-                    emit({"type": "apps", "apps": load_apps()})
-                else:
-                    emit({"type": "error", "msg": f"unknown app: {cmd[4:]}"})
-                continue
-            if cmd == "scan":
-                threading.Thread(target=_scan_and_report, daemon=True).start()
-                continue
-            if cmd.startswith("press:") or cmd.startswith("release:"):
-                verb, _, name = cmd.partition(":")
-                if name not in KEYS:
-                    emit({"type": "error", "msg": f"unknown key: {name}"})
-                    continue
-                now = time.monotonic()
-                if verb == "press":
-                    # Stamped before the send, which can block: the very first
-                    # press waits on the opening handshake, and without this
-                    # the release that follows would cut a real one-second
-                    # hold down to the few milliseconds left after connecting.
-                    held_since[name] = now
-                    if server.key(name, "Press"):
-                        pressed_at[name] = time.monotonic()
-                        emit({"type": "ack", "key": cmd})
-                else:
-                    intended = now - held_since.pop(name, now)
-                    already = now - pressed_at.pop(name, now)
-                    shortfall = intended - already
-                    if shortfall > 0.05:
-                        time.sleep(min(shortfall, 5.0))
-                    if server.key(name, "Release"):
-                        emit({"type": "ack", "key": cmd})
-                        if name in VOLUME_KEYS:
-                            threading.Thread(target=_volume_after,
-                                             args=(name,), daemon=True).start()
-                continue
-            if cmd.startswith("app:"):
-                key = cmd[4:]
-                if app_by_key(key) is None:
-                    emit({"type": "error", "msg": f"unknown app: {key}"})
-                else:
-                    threading.Thread(target=_launch_and_report,
-                                     args=(key,), daemon=True).start()
-                continue
-            if cmd not in KEYS:
-                emit({"type": "error", "msg": f"unknown key: {cmd}"})
-                continue
-            if server.key(cmd):
-                emit({"type": "ack", "key": cmd})
-                if cmd in VOLUME_KEYS:
-                    # The remote channel never reports the resulting volume;
-                    # give the TV a moment to apply the key, then read it.
-                    threading.Thread(target=_volume_after,
-                                     args=(cmd,), daemon=True).start()
     except (KeyboardInterrupt, BrokenPipeError):
         pass
     finally:
@@ -1374,7 +1431,7 @@ def main(argv):
               f"TV_NAME='{CLIENT_NAME}-2' {sys.argv[0]} state")
         return 0
     if argv[0] == "pick":
-        if len(argv) < 2:
+        if len(argv) < 2 or not valid_ipv4(argv[1]):
             print("usage: tvctl pick <ip>", file=sys.stderr)
             return 2
         info = choose_host(argv[1])

@@ -28,7 +28,10 @@ Panel {
   ipcTarget: "io.github.rdoupe.tvremote"
 
   readonly property string helper: String(Qt.resolvedUrl("tvctl")).replace(/^file:\/\//, "")
-  readonly property string host: String(setting("host", "192.168.100.59"))
+  // Empty means "find it". A published plugin cannot ship anyone's address,
+  // and a hardcoded one would silently defeat discovery on every install but
+  // the author's -- which is exactly what this line used to do.
+  readonly property string host: String(setting("host", ""))
   readonly property int pollInterval: Math.max(15, parseInt(setting("pollIntervalSec", 60)) || 60) * 1000
   readonly property bool hideWhenOff: String(setting("hideWhenOff", false)) === "true"
   readonly property bool resumeLastApp: String(setting("resumeLastApp", true)) !== "false"
@@ -344,6 +347,11 @@ Panel {
 
   onForegroundAppChanged: if (foregroundApp === launchingApp) launchingApp = ""
 
+  // Closing up after a wake that outlived the popup.
+  onWakingChanged: {
+    if (!waking && !opened && daemon.running) daemon.write("quit\n")
+  }
+
   onOpenedChanged: {
     if (opened) {
       errorText = ""
@@ -353,7 +361,11 @@ Panel {
       // gone. (tvctl releases on exit too, but the panel should not rely on
       // its own shutdown path to stop the volume climbing.)
       if (heldKey !== "") releaseKey(heldKey)
-      if (daemon.running) daemon.write("quit\n")
+      // A wake is a minute-long sequence -- magic packet, boot, power key,
+      // reopening the app -- and quitting the helper mid-way kills the
+      // daemon thread running it, leaving the TV stranded in standby with
+      // the packet already sent. Let it finish; onWakingChanged closes up.
+      if (daemon.running && !waking) daemon.write("quit\n")
       linkUp = false
     }
   }

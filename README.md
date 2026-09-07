@@ -33,8 +33,8 @@ required:
 ```
 
 ```
-192.168.100.59   55" QLED  (QN55Q8FAAFXZC)
-                 mac=94:e6:ba:a2:ea:85  token-auth=yes  remote=yes
+192.168.1.42     55" QLED  (QN55Q8FAAFXZC)
+                 mac=a4:5e:60:xx:xx:xx  token-auth=yes  remote=yes
 ```
 
 `remote=yes` is the TV itself saying it accepts remote keys. If you see that,
@@ -273,6 +273,45 @@ means. The status line says so rather than leaving you to guess: *"off —
 press ⏻ or an app to turn it on"*. This needs **network standby** enabled on the TV (*Settings →
 General → Network → Expert Settings → Power On with Mobile*, wording varies by
 model); with it off, the NIC sleeps too and no packet can reach it.
+
+## Security
+
+Worth reading before you install this, or anything else that runs inside your
+shell process.
+
+**TLS certificate verification is disabled** on the remote-control channel
+(`tvctl`, `WebSocket.__init__`). The TV serves a self-signed certificate keyed
+to its own UUID, signed by no CA, so there is nothing to verify it against —
+Samsung's own apps live with the same constraint. The practical consequence:
+someone in a network position to intercept your LAN traffic (a rogue access
+point, ARP spoofing) could read or alter the remote-control channel, including
+the pairing token that is sent on every connect. On a home network this is a
+theoretical concern; on shared or hostile Wi-Fi, treat it as real. Certificate
+pinning on first connect (trust-on-first-use, like SSH host keys) would close
+most of this and is not implemented yet.
+
+**Discovery sweeps your local /24.** One TCP connection to port 8001 per
+address, up to 64 at a time, roughly three seconds, and only on a cold start
+or an explicit rediscovery. That is deliberate — SSDP would be one packet
+instead of 254, but its replies are unicast UDP that default-deny firewalls
+silently eat. On a monitored or corporate network the sweep may still look
+like scanning to an IDS, so it is worth knowing it happens.
+
+**Wake-on-LAN broadcasts** at most a dozen small UDP packets to
+`255.255.255.255` and your subnet broadcast, and only when you ask.
+
+**What it touches on disk:** `~/.local/state/omarchy/tvremote-{token,host,mac,lastapp}`
+and `~/.config/omarchy/tvremote-apps.json`. Nothing outside those. The pairing
+token is created `0600` and never appears in output, arguments, or logs.
+
+**No shell, ever.** `tvctl` uses no `subprocess`, `os.system`, or shell string
+building; the panel launches it through an argv array. Everything the TV and
+the LAN say is treated as untrusted input: replies are size-capped, parsed
+defensively, and rendered as plain text so a device cannot inject markup into
+the panel.
+
+Found something? Please open an issue — or, for anything you would rather not
+post publicly, use GitHub's private vulnerability reporting on this repo.
 
 ## How it works
 
