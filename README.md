@@ -55,6 +55,23 @@ o.bind("SUPER + CTRL + SHIFT + S", "Samsung TV Remote",
        "omarchy-shell io.github.rdoupe.tvremote toggle")
 ```
 
+## Keyboard
+
+While the popup has focus:
+
+| Key | Does |
+|---|---|
+| arrows / `hjkl` | D-pad |
+| Enter / Space | OK |
+| Backspace / `b` | Back |
+| `+` / `-` | Volume |
+| `m` | Mute |
+| `1`-`9` | Launch the app on that tile |
+| Esc | Close |
+
+The app numbers are positional — `3` is whatever sits in the third tile — so
+they keep working when a rescan changes the list. Each tile shows its number.
+
 ## Apps
 
 App tiles are configured in `~/.config/omarchy/tvremote-apps.json`, seeded on

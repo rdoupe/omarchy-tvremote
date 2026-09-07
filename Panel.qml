@@ -60,6 +60,11 @@ Panel {
   // is down -- a tap is just a very short hold.
   property string heldKey: ""
 
+  // The app whose tile was just clicked. Without this a tile stayed unlit
+  // until the TV confirmed what was on screen, a second or more later, and
+  // the click read as ignored.
+  property string launchingApp: ""
+
   // Tiles vs discoveries: a scan finds everything on the TV, but only pinned
   // apps get a tile. Right-click moves an app between the two.
   readonly property var pinnedApps: apps.filter(function(a) { return a.show !== false })
@@ -102,7 +107,7 @@ Panel {
     heldKey = key
     lastKey = key
     flash.stop()
-    send("press:" + key)
+    Qt.callLater(function() { root.send("press:" + key) })
   }
 
   function releaseKey(key) {
@@ -114,8 +119,12 @@ Panel {
 
   function launchApp(key) {
     lastKey = "app:" + key
+    launchingApp = key
+    launchTimeout.restart()
     flash.restart()
-    send("app:" + key)
+    // Queued so the highlight is applied in this pass and painted before the
+    // command goes anywhere near the network.
+    Qt.callLater(function() { root.send("app:" + key) })
   }
 
   function rescanApps() {
@@ -125,6 +134,13 @@ Panel {
 
   function togglePin(key) {
     send("pin:" + key)
+  }
+
+  // 1-9 launch the tiles in order. A positional key suits a list whose
+  // contents change with a rescan: the number belongs to the slot, not to a
+  // particular app, and no selection cursor is needed to reach the fourth one.
+  function launchNth(n) {
+    if (n >= 1 && n <= pinnedApps.length) launchApp(String(pinnedApps[n - 1].key))
   }
 
   function handleLine(line) {
@@ -205,6 +221,16 @@ Panel {
     interval: 220
     onTriggered: root.lastKey = ""
   }
+
+  // Gives up on a launch that never showed up, so a tile cannot stay lit
+  // because an app failed to come to the front.
+  Timer {
+    id: launchTimeout
+    interval: 5000
+    onTriggered: root.launchingApp = ""
+  }
+
+  onForegroundAppChanged: if (foregroundApp === launchingApp) launchingApp = ""
 
   onOpenedChanged: {
     if (opened) {
@@ -291,6 +317,7 @@ Panel {
         else if (text === "+" || text === "=") root.press("volup")
         else if (text === "-" || text === "_") root.press("voldown")
         else if (text === "m") root.press("mute")
+        else if (text >= "1" && text <= "9") root.launchNth(parseInt(text))
       }
 
       Column {
@@ -365,6 +392,7 @@ Panel {
             width: parent.width
             height: Style.space(32)
             primary: true
+            number: 1
           }
 
           Flow {
@@ -378,6 +406,7 @@ Panel {
                 app: root.pinnedApps[index + 1]
                 width: (appFlow.width - appFlow.spacing * 2) / 3
                 height: Style.space(24)
+                number: index + 2
               }
             }
           }
@@ -489,7 +518,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             // Kept short so it never crowds the rescan button; the rest of
             // the shortcuts live in the buttons' own tooltips.
-            text: "arrows · enter · back"
+            text: "arrows · enter · back · 1-9"
             color: Color.muted
             elide: Text.ElideRight
             font.family: root.fontFamily
@@ -502,11 +531,15 @@ Panel {
             id: rescanButton
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            text: root.scanning ? "scanning…" : "rescan"
+            // An icon, not the word: the hint line beside it is the only
+            // place the 1-9 shortcut is advertised, and it needs the room.
+            text: root.scanning ? "scanning…" : ""
+            iconText: root.scanning ? "" : "󰑐"
+            iconSize: Style.font.body
             fontSize: Style.font.caption
             foreground: Color.muted
             verticalPadding: Style.space(2)
-            tooltipText: "Check the TV for installed apps"
+            tooltipText: "Rescan the TV for installed apps"
             onClicked: if (!root.scanning) root.rescanApps()
           }
         }
@@ -514,37 +547,98 @@ Panel {
     }
   }
 
-  // A streaming app. The TV serves no artwork for its apps -- there is no
-  // icon endpoint on this firmware -- so the tile is the app's name in its
-  // brand colour rather than a logo.
+  // A streaming app.
+  //
+  // The TV serves no artwork for its apps -- there is no icon endpoint on
+  // this firmware -- so the marks are the brand glyphs already in the bar's
+  // Nerd Font. They are approximations of trademarks, not official assets:
+  // fine for a personal widget, and the shapes are used unaltered, but a
+  // published plugin should ship each brand's own files under its terms.
+  //
+  // Content is drawn here rather than through Button's text/iconText because
+  // the two halves need different colours: a wordmark is neutral (YouTube's
+  // guidance is explicit that the word stays black or white while the play
+  // mark keeps the red), and only an app with no mark at all lets its name
+  // carry the brand colour.
   component AppTile: Button {
-    // Deliberately not `required`: a delegate that declares a required
-    // property stops Repeater injecting `index`, which is how each tile
-    // finds its app.
+    id: appTile
     property var app: null
     property bool primary: false
     property bool muted: false
+    property int number: 0
 
     readonly property string glyph: app ? String(app.glyph || "") : ""
+    readonly property string appName: app ? String(app.name) : ""
+    readonly property color brand: app ? String(app.color) : root.fg
+    // A third-width tile cannot hold a mark and a name without spilling, and
+    // the mark alone is the more recognisable half.
+    readonly property bool showName: primary || glyph === ""
 
-    // A third-width tile cannot hold a logo and a name without spilling, and
-    // the logo alone is the more recognisable half -- so the name only shows
-    // on the primary tile, or when the app has no mark at all.
-    text: app && (primary || glyph === "") ? String(app.name) : ""
-    iconText: glyph
-    iconSize: primary ? Style.font.heading : Style.font.iconLarge
-    fontSize: primary ? Style.font.subtitle : Style.font.caption
-    foreground: app ? String(app.color) : root.fg
-    accent: foreground
+    text: ""
+    iconText: ""
+    foreground: root.fg
+    accent: brand
     opacity: muted ? 0.65 : 1
     bordered: true
-    active: !!app && root.foregroundApp === String(app.key)
-    tooltipText: app ? (active ? String(app.name) + " — on screen now"
-                              : "Open " + String(app.name)
-                                + (muted ? "  (right-click to pin)"
-                                         : "  (right-click to unpin)")) : ""
-    onClicked: if (app) root.launchApp(String(app.key))
+    // Lit while the launch is in flight as well as once the TV confirms, so
+    // the tile responds on the click rather than on the round trip.
+    active: !!app && (root.foregroundApp === String(app.key)
+                      || root.launchingApp === String(app.key))
+    tooltipText: {
+      if (!app) return ""
+      var label = root.foregroundApp === String(app.key)
+        ? appName + " — on screen now" : "Open " + appName
+      if (number > 0) label += "  (press " + number + ")"
+      return label + (muted ? "  · right-click to pin" : "  · right-click to unpin")
+    }
+    onClicked: if (app) { pressPulse.restart(); root.launchApp(String(app.key)) }
     onRightClicked: if (app) root.togglePin(String(app.key))
+
+    SequentialAnimation {
+      id: pressPulse
+      NumberAnimation { target: appTile; property: "scale"; to: 0.95; duration: 70 }
+      NumberAnimation { target: appTile; property: "scale"; to: 1.0; duration: 110 }
+    }
+
+    // The 1-9 shortcut is only usable if the number is on the tile.
+    Text {
+      textFormat: Text.PlainText
+      visible: appTile.number > 0
+      text: String(appTile.number)
+      color: Color.muted
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.leftMargin: Style.space(4)
+      anchors.topMargin: Style.space(1)
+    }
+
+    Row {
+      anchors.centerIn: parent
+      spacing: Style.spacing.controlGap
+
+      Text {
+        textFormat: Text.PlainText
+        visible: appTile.glyph !== ""
+        text: appTile.glyph
+        color: appTile.brand
+        font.family: root.fontFamily
+        font.pixelSize: appTile.primary ? Style.font.heading : Style.font.iconLarge
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: appTile.showName
+        text: appTile.appName
+        color: appTile.glyph !== "" ? root.fg : appTile.brand
+        font.family: root.fontFamily
+        font.pixelSize: appTile.primary ? Style.font.subtitle : Style.font.caption
+        font.bold: appTile.primary
+        anchors.verticalCenter: parent.verticalCenter
+      }
+    }
   }
 
   // One key on the remote. Highlights on the TV's ack, not on the click.
@@ -566,6 +660,12 @@ Panel {
     active: root.lastKey === key || root.heldKey === key
     tooltipText: tip
 
+    SequentialAnimation {
+      id: keyPulse
+      NumberAnimation { target: keyButton; property: "scale"; to: 0.93; duration: 60 }
+      NumberAnimation { target: keyButton; property: "scale"; to: 1.0; duration: 100 }
+    }
+
     // Sits above Button's own MouseArea so a press and its release both land
     // here; Button.clicked is deliberately unused, since a tap is already the
     // short end of the same hold.
@@ -574,7 +674,7 @@ Panel {
       hoverEnabled: false
       acceptedButtons: Qt.LeftButton
       cursorShape: Qt.PointingHandCursor
-      onPressed: root.holdKey(keyButton.key)
+      onPressed: { keyPulse.restart(); root.holdKey(keyButton.key) }
       onReleased: root.releaseKey(keyButton.key)
       onCanceled: root.releaseKey(keyButton.key)
     }
