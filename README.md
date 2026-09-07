@@ -2,6 +2,8 @@
 
 **Samsung TV Remote** — a Samsung smart TV's remote in the Omarchy bar.
 
+![The panel: app tiles, D-pad, volume](preview.png)
+
 Volume, a D-pad, OK and Back — sent to the TV over its own Tizen
 remote-control WebSocket. While the popup has focus the **physical arrow
 keys, Enter and Backspace drive the TV directly**, which is the point of the
