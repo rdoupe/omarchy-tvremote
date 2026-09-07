@@ -82,12 +82,44 @@ omarchy bar put io.github.rdoupe.tvremote --after omarchy.audio
 
 Set the TV's address in the widget's settings (default `192.168.100.59`).
 
-The first keypress makes the TV show an **Allow / Deny** prompt. Accept it with
-the physical remote; the token the TV hands back is saved to
-`~/.local/state/omarchy/tvremote-token` and pairing never happens again. If the
-prompt never appears, the device was likely denied once before — clear it under
+### First run
+
+Opening the panel is all it takes. Measured on a wiped install:
+
+```
++2.5s  TV found on the network, four default app tiles seeded
++2.6s  reachable, not yet paired
++8.7s  paired -- token issued and saved
+```
+
+The TV shows an **Allow / Deny** prompt the first time a given client name
+connects. Accept it with the physical remote; the token is saved to
+`~/.local/state/omarchy/tvremote-token` and pairing never happens again.
+
+Two things about that prompt are worth knowing, both learned the hard way:
+
+- **The prompt lives exactly as long as the connection that raised it.** Never
+  retry while it is up — each new attempt dismisses the pending one, so a
+  retry loop guarantees nobody can click it in time. This client makes one
+  connection and waits.
+- **A tokenless handshake is slow** (~8s here, against a routine 1.5s), so the
+  first connect gets a much longer timeout than later ones. With the ordinary
+  timeout it raced the deadline and failed with a bare `TimeoutError` on the
+  one connection that matters most.
+
+Right after issuing a token the TV closes the socket; the client reconnects
+with it and the connection is then stable. That single disconnect on first run
+is expected.
+
+### Resetting the pairing
+
+Deleting the token file only clears *this* side. **The TV keeps its own
+allow-list**, so reconnecting under the same client name is re-authorised
+silently and never re-prompts. To genuinely test a first run, either use a
+name the TV has not seen (`TV_NAME=…`) or remove the entry on the TV under
 *Settings → General → External Device Manager → Device Connect Manager →
-Device List* on the TV.
+Device List*. That list is also where to look if the prompt never appears —
+the device was probably denied once, and the TV will not ask again.
 
 Optional keybinding — opens the popup already focused, so the arrow keys are
 live immediately:

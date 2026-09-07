@@ -387,11 +387,17 @@ def connect(timeout=8):
     if token:
         path += "&token=" + token
 
+    # A first, tokenless connection is slower than a routine one: the TV is
+    # deciding whether to prompt, and the handshake itself took 8s when
+    # measured -- exactly the default, so first-run pairing raced the
+    # deadline and failed with an opaque timeout.
+    handshake_timeout = timeout if token else max(timeout, 25)
+
     ws = None
     last = None
     for port, tls in channel_endpoints():
         try:
-            ws = WebSocket(HOST, port, path, timeout, tls=tls)
+            ws = WebSocket(HOST, port, path, handshake_timeout, tls=tls)
             break
         except Exception as exc:
             last = exc
@@ -1033,6 +1039,9 @@ class Server:
 def _warm(server):
     """Open the socket before any key is pressed.
 
+    On a first run this is also what triggers pairing, so a failure here is
+    reported as a pairing hint rather than a bare exception.
+
     The panel starts this child when its popup opens, so the handshake
     overlaps with the user reaching for a button instead of delaying the
     first press -- and the panel can say "connected" truthfully.
@@ -1040,7 +1049,11 @@ def _warm(server):
     try:
         server.ensure()
     except Exception as exc:
-        emit({"type": "error", "msg": f"{type(exc).__name__}: {exc}"})
+        if not load_token():
+            emit({"type": "error",
+                  "msg": "Accept the connection prompt on the TV, then reopen"})
+        else:
+            emit({"type": "error", "msg": f"{type(exc).__name__}: {exc}"})
 
 
 def serve():
