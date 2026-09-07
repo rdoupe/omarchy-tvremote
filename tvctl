@@ -1307,7 +1307,7 @@ def _volume_after(_cmd):
 
 
 def main(argv):
-    if argv and argv[0] not in ("-h", "--help", "discover", "pick"):
+    if argv and argv[0] not in ("-h", "--help", "discover", "pick", "unpair"):
         ensure_host()
         # `serve` is the one command that is useful without a TV: it is what
         # presents the picker when several were found, and the "no TV found"
@@ -1320,7 +1320,8 @@ def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip().splitlines()[0])
         print("usage: tvctl serve | discover | state | apps | scan [--save]"
-              " | app <name> | wake | hold <key> [secs] | <key>...")
+              " | app <name> | wake | hold <key> [secs] | unpair [--all]"
+              " | <key>...")
         print("keys:  " + " ".join(sorted(KEYS)))
         print("apps:  " + " ".join(a["key"] for a in load_apps()))
         return 0
@@ -1329,6 +1330,32 @@ def main(argv):
         return 0
     if argv[0] == "state":
         emit(state_payload())
+        return 0
+    if argv[0] == "unpair":
+        # Only ever half the job: the TV keeps its own allow-list keyed by
+        # client name, and reconnecting under a name it still trusts is
+        # re-authorised silently. Say so rather than implying it is done.
+        removed = []
+        targets = [("token", TOKEN_FILE)]
+        if "--all" in argv:
+            targets += [("host", HOST_FILE), ("mac", MAC_FILE),
+                        ("last app", LAST_APP_FILE), ("apps", APPS_FILE)]
+        for label, path in targets:
+            try:
+                os.remove(path)
+                removed.append(label)
+            except OSError:
+                pass
+        print("cleared locally: " + (", ".join(removed) if removed else "nothing"))
+        print()
+        print(f"The TV still trusts this client by name ({CLIENT_NAME!r}).")
+        print("To make it ask again, remove that entry on the TV:")
+        print("  Settings -> General -> External Device Manager")
+        print("            -> Device Connect Manager -> Device List")
+        print("(exact wording varies by model year)")
+        print()
+        print(f"Or connect under a name it has not seen: "
+              f"TV_NAME='{CLIENT_NAME}-2' {sys.argv[0]} state")
         return 0
     if argv[0] == "pick":
         if len(argv) < 2:

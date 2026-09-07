@@ -111,6 +111,13 @@ Right after issuing a token the TV closes the socket; the client reconnects
 with it and the connection is then stable. That single disconnect on first run
 is expected.
 
+### Unpairing
+
+```bash
+./tvctl unpair          # forget the token
+./tvctl unpair --all    # also forget the TV address, MAC, last app and tiles
+```
+
 ### Resetting the pairing
 
 Deleting the token file only clears *this* side. **The TV keeps its own
