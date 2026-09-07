@@ -70,7 +70,9 @@ While the popup has focus:
 | Esc | Close |
 
 The app numbers are positional — `3` is whatever sits in the third tile — so
-they keep working when a rescan changes the list. Each tile shows its number.
+they keep working when a rescan changes the list. Each tile shows its number,
+and each row of the panel carries its own hint underneath, rather than one
+legend at the foot describing controls further up.
 
 ## Apps
 

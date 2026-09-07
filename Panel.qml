@@ -412,16 +412,35 @@ Panel {
           }
 
           // Everything else the last scan found on the TV, folded away so the
-          // apps actually used keep the top of the panel.
-          Button {
-            visible: root.otherApps.length > 0
+          // apps actually used keep the top of the panel. Rescan sits here
+          // rather than at the foot of the panel, next to the list it
+          // refreshes.
+          Item {
             width: parent.width
             height: Style.space(20)
-            text: (root.moreOpen ? "󰅃  " : "󰅀  ") + root.otherApps.length + " more on the TV"
-            fontSize: Style.font.caption
-            foreground: Color.muted
-            tooltipText: "Apps found on the TV. Right-click one to pin it."
-            onClicked: root.moreOpen = !root.moreOpen
+
+            Button {
+              anchors.centerIn: parent
+              visible: root.otherApps.length > 0
+              text: (root.moreOpen ? "󰅃  " : "󰅀  ") + root.otherApps.length + " more on the TV"
+              fontSize: Style.font.caption
+              foreground: Color.muted
+              tooltipText: "Apps found on the TV. Right-click one to pin it."
+              onClicked: root.moreOpen = !root.moreOpen
+            }
+
+            Button {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.scanning ? "scanning…" : ""
+              iconText: root.scanning ? "" : "󰑐"
+              iconSize: Style.font.body
+              fontSize: Style.font.caption
+              foreground: Color.muted
+              verticalPadding: Style.space(2)
+              tooltipText: "Rescan the TV for installed apps"
+              onClicked: if (!root.scanning) root.rescanApps()
+            }
           }
 
           Flow {
@@ -459,6 +478,19 @@ Panel {
           Item { width: root.keySize; height: root.keySize }
           RemoteKey { key: "down"; glyph: "󰅀" }
           RemoteKey { key: "back"; glyph: "󰌑"; tip: "Back  (Backspace)" }
+        }
+
+        // Each hint sits under the row it describes rather than in one legend
+        // at the foot of the panel, so it is read next to the buttons it is
+        // about. The app tiles need no line of their own -- they carry their
+        // numbers.
+        Text {
+          textFormat: Text.PlainText
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: "arrows · enter · backspace"
+          color: Color.muted
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
 
         // ---------- volume ----------
@@ -505,43 +537,13 @@ Panel {
           RemoteKey { key: "volup"; glyph: "󰐕"; tip: "Volume up  (+)" }
         }
 
-        Item {
-          width: parent.width
-          implicitHeight: hint.implicitHeight
-
-          Text {
-            id: hint
-            textFormat: Text.PlainText
-            anchors.left: parent.left
-            anchors.right: rescanButton.left
-            anchors.rightMargin: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            // Kept short so it never crowds the rescan button; the rest of
-            // the shortcuts live in the buttons' own tooltips.
-            text: "arrows · enter · back · 1-9"
-            color: Color.muted
-            elide: Text.ElideRight
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-
-          // The TV answers no "what is installed?" question, so the app list
-          // is only ever as fresh as the last probe of known ids.
-          Button {
-            id: rescanButton
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            // An icon, not the word: the hint line beside it is the only
-            // place the 1-9 shortcut is advertised, and it needs the room.
-            text: root.scanning ? "scanning…" : ""
-            iconText: root.scanning ? "" : "󰑐"
-            iconSize: Style.font.body
-            fontSize: Style.font.caption
-            foreground: Color.muted
-            verticalPadding: Style.space(2)
-            tooltipText: "Rescan the TV for installed apps"
-            onClicked: if (!root.scanning) root.rescanApps()
-          }
+        Text {
+          textFormat: Text.PlainText
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: "− + · m to mute"
+          color: Color.muted
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
       }
     }
