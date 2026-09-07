@@ -32,17 +32,25 @@ import threading
 import time
 import urllib.request
 
-HOST = os.environ.get("TV_HOST", "192.168.100.59")
+# Empty means "find it" -- a published plugin cannot ship someone's IP, and a
+# TV that moves on DHCP would otherwise silently stop working.
+HOST = os.environ.get("TV_HOST", "").strip()
 WS_PORT = 8002
 API_PORT = 8001
 UPNP_PORT = 9197
 CLIENT_NAME = os.environ.get("TV_NAME", "Omarchy")
+# Reopen the last app after a wake. Off by setting TV_RESUME_APP=0.
+RESUME_APP = os.environ.get("TV_RESUME_APP", "1") not in ("0", "false", "no")
 STATE_DIR = os.path.expanduser("~/.local/state/omarchy")
 TOKEN_FILE = os.path.join(STATE_DIR, "tvremote-token")
 # Learned from the TV while it is reachable, so it is still on hand when the
 # set is off -- which is exactly when it is needed, since a TV that is off
 # cannot be asked anything.
 MAC_FILE = os.path.join(STATE_DIR, "tvremote-mac")
+# The app that was last on screen, so waking the TV can put it back rather
+# than dropping you on the home screen.
+LAST_APP_FILE = os.path.join(STATE_DIR, "tvremote-lastapp")
+HOST_FILE = os.path.join(STATE_DIR, "tvremote-host")
 
 # Names the panel and the CLI use -> Tizen key codes.
 KEYS = {
@@ -246,12 +254,15 @@ def emit(obj):
 class WebSocket:
     """Minimal RFC6455 client. Text frames only; that is all the TV sends."""
 
-    def __init__(self, host, port, path, timeout):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False          # the TV serves a self-signed cert
-        ctx.verify_mode = ssl.CERT_NONE     # keyed to its own UUID, not a CA
+    def __init__(self, host, port, path, timeout, tls=True):
         sock = socket.create_connection((host, port), timeout=timeout)
-        self.sock = ctx.wrap_socket(sock, server_hostname=host)
+        if tls:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False      # the TV serves a self-signed cert
+            ctx.verify_mode = ssl.CERT_NONE # keyed to its own UUID, not a CA
+            self.sock = ctx.wrap_socket(sock, server_hostname=host)
+        else:
+            self.sock = sock
         self.sock.settimeout(timeout)
         self.send_lock = threading.Lock()
         self.buf = b""
@@ -353,6 +364,16 @@ def save_token(token):
     os.chmod(TOKEN_FILE, 0o600)
 
 
+def channel_endpoints():
+    """Where the remote-control channel lives, best first.
+
+    2016 and later: TLS on 8002 with a token. 2014-15 Tizen sets have no
+    8002 at all and take a plain ws:// on 8001 with no token -- so a failure
+    on the first is a reason to try the second, not to give up.
+    """
+    return [(WS_PORT, True), (API_PORT, False)]
+
+
 def connect(timeout=8):
     """Open the remote-control channel. Returns (socket, newly_paired).
 
@@ -365,7 +386,17 @@ def connect(timeout=8):
             + base64.b64encode(CLIENT_NAME.encode()).decode())
     if token:
         path += "&token=" + token
-    ws = WebSocket(HOST, WS_PORT, path, timeout)
+
+    ws = None
+    last = None
+    for port, tls in channel_endpoints():
+        try:
+            ws = WebSocket(HOST, port, path, timeout, tls=tls)
+            break
+        except Exception as exc:
+            last = exc
+    if ws is None:
+        raise last if last else ConnectionError("no remote-control channel")
     ws.sock.settimeout(timeout if token else 45)
     try:
         while True:
@@ -408,6 +439,171 @@ def send_key(ws, name, cmd="Click"):
 # --------------------------------------------------------------- TV queries
 
 
+def local_ipv4():
+    """This machine's LAN address, without sending anything.
+
+    A connected UDP socket just picks the route; TEST-NET-1 is used as the
+    target so nothing is ever addressed to a real host.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("192.0.2.1", 9))
+        return sock.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        sock.close()
+
+
+def support_map(api_data):
+    raw = api_data.get("isSupport") or "{}"
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def identify(ip, timeout=2):
+    """Return the device dict if `ip` is a Samsung TV, else None."""
+    try:
+        with urllib.request.urlopen(
+                f"http://{ip}:{API_PORT}/api/v2/", timeout=timeout) as resp:
+            data = json.load(resp)
+    except Exception:
+        return None
+    device = data.get("device") or {}
+    if "samsung" not in str(device.get("type", "")).lower():
+        return None
+    name = str(device.get("name") or "TV")
+    name = name.replace("&quot;", '"').replace("&amp;", "&").replace("&apos;", "'")
+    return {
+        "ip": ip,
+        "name": name,
+        "model": device.get("modelName", ""),
+        "mac": re.sub(r"[^0-9A-Fa-f]", "", device.get("wifiMac") or ""),
+        "tokenAuth": str(device.get("TokenAuthSupport", "")).lower() == "true",
+        # isSupport is JSON *inside* a JSON string, so it needs a second parse.
+        "remote": str((support_map(data)).get("remote_available", "")).lower() == "true",
+        "firmware": device.get("firmwareVersion", ""),
+    }
+
+
+def discover(timeout=0.6, workers=64):
+    """Find Samsung TVs by asking every address on this /24 for /api/v2/.
+
+    Deliberately a TCP sweep rather than SSDP. SSDP is the documented way and
+    it is one packet instead of 254, but its replies are unicast UDP from the
+    TV to an ephemeral port, which conntrack does not see as ESTABLISHED --
+    so a default-deny firewall silently eats them and discovery "just doesn't
+    work" with nothing to see. The sweep is plain outbound TCP that any
+    firewall already allows, and it costs about three seconds.
+    """
+    me = local_ipv4()
+    if not me:
+        return []
+    base = me.rsplit(".", 1)[0]
+    candidates = [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" != me]
+
+    open_hosts = []
+    lock = threading.Lock()
+
+    def probe(ip):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            if sock.connect_ex((ip, API_PORT)) == 0:
+                with lock:
+                    open_hosts.append(ip)
+        except OSError:
+            pass
+        finally:
+            sock.close()
+
+    queue = list(candidates)
+    qlock = threading.Lock()
+
+    def worker():
+        while True:
+            with qlock:
+                if not queue:
+                    return
+                ip = queue.pop()
+            probe(ip)
+
+    threads = [threading.Thread(target=worker, daemon=True)
+               for _ in range(min(workers, len(candidates)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout * 8 + 5)
+
+    found = []
+    for ip in sorted(open_hosts):
+        info = identify(ip)
+        if info:
+            found.append(info)
+    return found
+
+
+def load_host():
+    try:
+        with open(HOST_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_host(ip):
+    if not ip or ip == load_host():
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(HOST_FILE, "w") as f:
+        f.write(ip)
+
+
+# What the last discovery turned up. Kept so a caller that finds several TVs
+# can offer the choice instead of guessing.
+DISCOVERED = []
+
+
+def choose_host(ip):
+    """Commit to one TV: remember it, and its MAC while the set is reachable."""
+    global HOST
+    info = identify(ip, timeout=3)
+    HOST = ip
+    save_host(ip)
+    if info and info["mac"]:
+        save_mac(info["mac"])
+    return info
+
+
+def ensure_host(allow_discovery=True):
+    """Settle on a TV address: explicit setting, then last known, then search.
+
+    One TV on the network is chosen automatically. Several is not something
+    to guess at -- HOST is left empty and DISCOVERED holds the candidates for
+    the caller to present.
+    """
+    global HOST, DISCOVERED
+    if HOST:
+        return HOST
+    cached = load_host()
+    if cached and identify(cached, timeout=2):
+        HOST = cached
+        return HOST
+    if not allow_discovery:
+        HOST = cached
+        return HOST
+    DISCOVERED = discover()
+    if len(DISCOVERED) == 1:
+        choose_host(DISCOVERED[0]["ip"])
+    elif not DISCOVERED and cached:
+        HOST = cached          # off right now, but it is where it last was
+    return HOST
+
+
 def load_mac():
     mac = os.environ.get("TV_MAC", "")
     if not mac:
@@ -427,6 +623,22 @@ def save_mac(mac):
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(MAC_FILE, "w") as f:
         f.write(clean)
+
+
+def load_last_app():
+    try:
+        with open(LAST_APP_FILE) as f:
+            return re.sub(r"[^a-z0-9]", "", f.read().strip().lower())[:40]
+    except OSError:
+        return ""
+
+
+def save_last_app(key):
+    if not key or key == load_last_app():
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(LAST_APP_FILE, "w") as f:
+        f.write(key)
 
 
 def wake(mac=None):
@@ -463,6 +675,55 @@ def wake(mac=None):
     finally:
         sock.close()
     return sent
+
+
+def power_on(send_power, on_progress=None, timeout=80):
+    """Bring the TV from off to a picture. Two stages, both required.
+
+    Measured on this set: the magic packet alone wakes only the network
+    stack. The API starts answering after ~40s and then reports
+    PowerState=standby indefinitely -- it sat there for well over a minute
+    and never promoted itself. The screen only comes on once a power key is
+    sent over the websocket that the first stage made reachable.
+
+    `send_power` is a callable that delivers KEY_POWER, so the caller can
+    supply its own already-connected socket.
+    """
+    wake()
+    if on_progress:
+        on_progress("packet")
+
+    device = None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(2)
+        device = read_device(timeout=2)
+        if device:
+            break
+    if not device:
+        return False
+    if on_progress:
+        on_progress("network")
+
+    if str(device.get("power", "")).lower() != "standby":
+        return True
+
+    for _ in range(3):
+        try:
+            if send_power():
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+    if on_progress:
+        on_progress("power")
+
+    for _ in range(12):
+        time.sleep(2)
+        device = read_device(timeout=2)
+        if device and str(device.get("power", "")).lower() == "on":
+            return True
+    return False
 
 
 def soap(action, body, timeout=3):
@@ -579,6 +840,8 @@ def foreground_app(timeout=3):
         t.start()
     for t in threads:
         t.join(timeout + 1)
+    if found[0]:
+        save_last_app(found[0])
     return found[0] or ""
 
 
@@ -781,6 +1044,15 @@ def _warm(server):
 
 
 def serve():
+    if not HOST:
+        # Either nothing was found, or several were and the choice is the
+        # user's to make. Both are reported the same way; the panel shows a
+        # picker when the list is non-empty.
+        emit({"type": "tvs", "tvs": DISCOVERED})
+        emit({"type": "state", "reachable": False, "paired": bool(load_token()),
+              "name": "Choose a TV" if DISCOVERED else "No TV found",
+              "model": "", "power": "off", "canWake": False,
+              "volume": -1, "muted": False, "app": ""})
     server = Server()
     # When each key was asked for, and when its Press actually went out.
     held_since = {}
@@ -814,8 +1086,25 @@ def serve():
                 threading.Thread(
                     target=lambda: emit(state_payload()), daemon=True).start()
                 continue
+            if cmd.startswith("pick:"):
+                ip = cmd[5:]
+                if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+                    emit({"type": "error", "msg": f"not an address: {ip}"})
+                    continue
+                info = choose_host(ip)
+                emit({"type": "picked", "ip": ip,
+                      "name": info["name"] if info else ip})
+                emit({"type": "apps", "apps": load_apps()})
+                threading.Thread(
+                    target=lambda: emit(state_payload()), daemon=True).start()
+                threading.Thread(target=_warm, args=(server,), daemon=True).start()
+                continue
+            if cmd == "rediscover":
+                threading.Thread(target=_rediscover, daemon=True).start()
+                continue
             if cmd == "wake":
-                threading.Thread(target=_wake_and_watch, daemon=True).start()
+                threading.Thread(target=_wake_and_watch,
+                                 args=(server,), daemon=True).start()
                 continue
             if cmd == "apps":
                 emit({"type": "apps", "apps": load_apps()})
@@ -904,25 +1193,46 @@ def _deferred_app():
         emit({"type": "app", "app": app})
 
 
-def _wake_and_watch():
-    """Send the magic packet, then watch for the TV to come up.
+def _rediscover():
+    global DISCOVERED
+    DISCOVERED = discover()
+    emit({"type": "tvs", "tvs": DISCOVERED})
 
-    A set takes some seconds to boot far enough to answer, so the panel is
-    told as soon as it does rather than waiting for the next poll.
+
+def _wake_and_watch(server):
+    """Full power-on, reporting each stage so the panel can say where it is.
+
+    Finishes by reopening whatever was last on screen: a TV woken from the
+    network lands on the home screen, which is never where you left off.
     """
+    def progress(stage):
+        emit({"type": "waking", "stage": stage})
+        if stage == "network":
+            emit(state_payload(with_app=False))
+
     try:
-        wake()
+        ok = power_on(lambda: server.key("power"), on_progress=progress)
     except Exception as exc:
         emit({"type": "error", "msg": f"wake: {exc}"})
         return
-    emit({"type": "ack", "key": "wake"})
-    for _ in range(15):
+    if not ok:
+        emit({"type": "error", "msg": "TV did not come on after wake"})
+        emit(state_payload(with_app=False))
+        return
+
+    last = load_last_app()
+    if RESUME_APP and last and app_by_key(last):
+        emit({"type": "waking", "stage": "resume", "app": last})
+        for attempt in range(3):
+            time.sleep(3)                 # the TV refuses launches while booting
+            try:
+                launch_app(last)
+                break
+            except Exception:
+                if attempt == 2:
+                    emit({"type": "error", "msg": f"could not reopen {last}"})
         time.sleep(2)
-        payload = state_payload(with_app=False)
-        if payload["reachable"]:
-            emit(payload)
-            return
-    emit({"type": "error", "msg": "TV did not answer after wake"})
+    emit(state_payload())
 
 
 def _scan_and_report():
@@ -971,10 +1281,20 @@ def _volume_after(_cmd):
 
 
 def main(argv):
+    if argv and argv[0] not in ("-h", "--help", "discover", "pick"):
+        ensure_host()
+        # `serve` is the one command that is useful without a TV: it is what
+        # presents the picker when several were found, and the "no TV found"
+        # state when none were. Bailing here left first-launch users on a
+        # network with two TVs staring at a widget whose backend had exited.
+        if not HOST and argv[0] != "serve":
+            print("no TV found; run `tvctl discover` or set TV_HOST",
+                  file=sys.stderr)
+            return 1
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip().splitlines()[0])
-        print("usage: tvctl serve | state | apps | scan [--save] | app <name>"
-              " | wake | hold <key> [secs] | <key>...")
+        print("usage: tvctl serve | discover | state | apps | scan [--save]"
+              " | app <name> | wake | hold <key> [secs] | <key>...")
         print("keys:  " + " ".join(sorted(KEYS)))
         print("apps:  " + " ".join(a["key"] for a in load_apps()))
         return 0
@@ -984,10 +1304,42 @@ def main(argv):
     if argv[0] == "state":
         emit(state_payload())
         return 0
-    if argv[0] == "wake":
-        n = wake(argv[1] if len(argv) > 1 else None)
-        print(f"sent {n} magic packets to {load_mac() or argv[1]}")
+    if argv[0] == "pick":
+        if len(argv) < 2:
+            print("usage: tvctl pick <ip>", file=sys.stderr)
+            return 2
+        info = choose_host(argv[1])
+        print(f"using {argv[1]}" + (f" ({info['name']})" if info else
+                                    " (not answering right now)"))
         return 0
+    if argv[0] == "discover":
+        found = discover()
+        if not found:
+            print("no Samsung TV found on this network", file=sys.stderr)
+            return 1
+        for d in found:
+            mac = ":".join(d["mac"][i:i + 2] for i in range(0, 12, 2))
+            print(f"{d['ip']:15s}  {d['name']}  ({d['model']})")
+            print(f"                 mac={mac or 'unknown'}  "
+                  f"token-auth={'yes' if d['tokenAuth'] else 'no'}  "
+                  f"remote={'yes' if d['remote'] else 'no'}")
+        return 0
+    if argv[0] == "wake":
+        def send_power():
+            ws, _ = connect()
+            try:
+                send_key(ws, "power")
+                time.sleep(0.25)
+                return True
+            finally:
+                ws.close()
+
+        stages = {"packet": "magic packet sent",
+                  "network": "network stack up (standby)",
+                  "power": "power key sent"}
+        ok = power_on(send_power, on_progress=lambda st: print(stages.get(st, st)))
+        print("TV is on" if ok else "TV did not come on")
+        return 0 if ok else 1
     if argv[0] == "hold":
         # tvctl hold voldown 1.5 -- the CLI equivalent of holding the button.
         if len(argv) < 2 or argv[1].lower() not in KEYS:

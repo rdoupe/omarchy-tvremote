@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.rdoupe.tvremote",
   "name": "Samsung TV Remote",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Ryan Doupe",
   "license": "MIT",
-  "description": "A Samsung smart TV's remote in the bar: volume, D-pad, OK and Back, plus one-click launch for YouTube, Netflix, Prime Video and Spotify \u2014 sent over the TV's own Tizen remote-control WebSocket. While the popup has focus the physical arrow keys, Enter and Backspace drive the TV directly, and the bar icon takes a scroll wheel for volume. Needs nothing but Python 3; the TV shows a one-time Allow prompt on first use.",
+  "description": "A Samsung smart TV's remote in the bar: volume, D-pad, OK and Back, app tiles for whatever streaming apps the TV has installed, hold-to-repeat that ramps like the real remote, and wake-on-LAN that reopens the app you were last watching. Finds the TV on the network by itself. Needs nothing but Python 3; the TV shows a one-time Allow prompt on first use.",
   "kinds": [
     "bar-widget"
   ],
@@ -19,16 +19,17 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "host": "192.168.100.59",
+      "host": "",
       "pollIntervalSec": 60,
-      "hideWhenOff": false
+      "hideWhenOff": false,
+      "resumeLastApp": true
     },
     "schema": [
       {
         "key": "host",
         "type": "string",
-        "label": "TV address on the network",
-        "defaultValue": "192.168.100.59"
+        "label": "TV address on the network (leave blank to find it automatically)",
+        "defaultValue": ""
       },
       {
         "key": "pollIntervalSec",
@@ -44,6 +45,12 @@
         "type": "boolean",
         "label": "Hide the icon while the TV is off",
         "defaultValue": false
+      },
+      {
+        "key": "resumeLastApp",
+        "type": "boolean",
+        "label": "After waking the TV, reopen the app that was last on screen",
+        "defaultValue": true
       }
     ]
   }

@@ -31,6 +31,7 @@ Panel {
   readonly property string host: String(setting("host", "192.168.100.59"))
   readonly property int pollInterval: Math.max(15, parseInt(setting("pollIntervalSec", 60)) || 60) * 1000
   readonly property bool hideWhenOff: String(setting("hideWhenOff", false)) === "true"
+  readonly property bool resumeLastApp: String(setting("resumeLastApp", true)) !== "false"
 
   // Device facts, refreshed by `tvctl state`.
   property bool reachable: false
@@ -38,6 +39,13 @@ Panel {
   // Whether a MAC has been learned, which is what makes wake-on-LAN possible.
   property bool canWake: false
   property bool waking: false
+  property string wakeStage: ""
+
+  // Candidate TVs from a discovery sweep. Populated only when the choice is
+  // genuinely open -- one TV on the network is picked automatically, so this
+  // list appearing means there were several (or none).
+  property var tvChoices: []
+  readonly property bool picking: tvChoices.length > 0
   property string tvName: "TV"
   property string power: "unknown"
   property int volume: -1
@@ -135,8 +143,28 @@ Panel {
   // stays listening while the set sleeps.
   function wakeTv() {
     waking = true
+    wakeStage = ""
     wakeTimeout.restart()
     send("wake")
+  }
+
+  // The whole sequence -- packet, boot, power key, reopening the last app --
+  // runs to about a minute on this set, so the giving-up point is generous.
+  readonly property string wakeLabel: {
+    if (wakeStage === "network") return "waking… TV is in standby"
+    if (wakeStage === "power") return "waking… turning the screen on"
+    if (wakeStage === "resume") return "reopening your last app…"
+    return "waking… this takes about a minute"
+  }
+
+  function pickTv(ip) {
+    tvChoices = []
+    send("pick:" + ip)
+  }
+
+  function rediscover() {
+    scanning = true
+    send("rediscover")
   }
 
   function rescanApps() {
@@ -166,7 +194,10 @@ Panel {
       reachable = !!msg.reachable
       paired = !!msg.paired
       if (msg.canWake !== undefined) canWake = !!msg.canWake
-      if (reachable) waking = false
+      // Not merely "reachable": the magic packet makes the TV answer while
+      // it is still in standby with the screen off, so the wake is not done
+      // until it actually reports itself on.
+      if (power === "on") { waking = false; wakeStage = "" }
       tvName = String(msg.name || "TV")
       power = String(msg.power || "unknown")
       if (msg.volume !== undefined) volume = parseInt(msg.volume)
@@ -176,6 +207,16 @@ Panel {
     } else if (msg.type === "volume") {
       volume = parseInt(msg.volume)
       muted = !!msg.muted
+    } else if (msg.type === "tvs") {
+      tvChoices = msg.tvs || []
+      scanning = false
+    } else if (msg.type === "picked") {
+      tvChoices = []
+      tvName = String(msg.name || "TV")
+    } else if (msg.type === "waking") {
+      waking = true
+      wakeStage = String(msg.stage || "")
+      wakeTimeout.restart()
     } else if (msg.type === "apps") {
       apps = msg.apps || []
       if (msg.scanned) scanning = false
@@ -197,7 +238,8 @@ Panel {
   Process {
     id: daemon
     command: [root.helper, "serve"]
-    environment: ({ "TV_HOST": root.host })
+    environment: ({ "TV_HOST": root.host,
+                    "TV_RESUME_APP": root.resumeLastApp ? "1" : "0" })
     stdinEnabled: true
     stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
     stderr: SplitParser { onRead: function(line) { root.errorText = line } }
@@ -240,8 +282,8 @@ Panel {
   // because an app failed to come to the front.
   Timer {
     id: wakeTimeout
-    interval: 35000
-    onTriggered: root.waking = false
+    interval: 90000
+    onTriggered: { root.waking = false; root.wakeStage = "" }
   }
 
   Timer {
@@ -372,7 +414,7 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: root.waking ? "waking…"
+              text: root.waking ? root.wakeLabel
                 : !root.reachable ? (root.canWake ? "off — press ⏻ to wake"
                                                   : "off or unreachable")
                 : root.errorText !== "" ? root.errorText
@@ -403,6 +445,47 @@ Panel {
           }
         }
 
+        // ---------- choose a TV (first launch, several found) ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+          visible: root.picking
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Several TVs on the network — which one?"
+            color: Color.muted
+            width: parent.width
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Repeater {
+            model: root.tvChoices.length
+
+            Button {
+              width: parent.width
+              height: Style.space(26)
+              text: String(root.tvChoices[index].name)
+              fontSize: Style.font.body
+              foreground: root.fg
+              bordered: true
+              tooltipText: String(root.tvChoices[index].model) + "  ·  "
+                           + String(root.tvChoices[index].ip)
+              onClicked: root.pickTv(String(root.tvChoices[index].ip))
+            }
+          }
+
+          Button {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: root.scanning ? "searching…" : "search again"
+            fontSize: Style.font.caption
+            foreground: Color.muted
+            onClicked: if (!root.scanning) root.rediscover()
+          }
+        }
+
         // ---------- apps ----------
         // Directly under the header, because launching an app is the most
         // common reason to open this at all -- and the first configured app
@@ -411,7 +494,7 @@ Panel {
         Column {
           width: parent.width
           spacing: Style.space(4)
-          visible: root.apps.length > 0
+          visible: root.apps.length > 0 && !root.picking
 
           AppTile {
             app: root.pinnedApps.length > 0 ? root.pinnedApps[0] : null
@@ -489,6 +572,7 @@ Panel {
 
         // ---------- D-pad ----------
         Grid {
+          visible: !root.picking
           anchors.horizontalCenter: parent.horizontalCenter
           columns: 3
           spacing: Style.space(4)
@@ -512,6 +596,7 @@ Panel {
         // numbers.
         Text {
           textFormat: Text.PlainText
+          visible: !root.picking
           anchors.horizontalCenter: parent.horizontalCenter
           text: "arrows · enter · backspace"
           color: Color.muted
@@ -521,6 +606,7 @@ Panel {
 
         // ---------- volume ----------
         Row {
+          visible: !root.picking
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: Style.space(4)
 
@@ -566,6 +652,7 @@ Panel {
         Text {
           textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
+          visible: !root.picking
           // The literal keys: volume up is the unshifted "=", not "+".
           text: "- = · m to mute"
           color: Color.muted

@@ -18,10 +18,52 @@ Streaming apps get one-click tiles — YouTube on a full-width primary tile,
 then Netflix, Prime Video and Spotify — and the panel can probe the TV for
 whatever else is installed.
 
-Tested against a QN55Q8FAAFXZC (2017 QLED, Tizen 2.0.25). It should work with
-any Samsung set whose `http://<tv>:8001/api/v2/` reports
-`"TokenAuthSupport":"true"` and `"remote_available":"true"` — roughly 2016 and
-newer.
+## Which TVs does this support?
+
+Verified end to end on exactly one set: **QN55Q8FAAFXZC** (2017 QLED, Tizen
+2.0.25, firmware reported as "Unknown"). Everything below that is not marked
+*verified* is reasoned from the protocol, not tested — if you try it on
+another model, please open an issue saying what worked.
+
+| Era | Channel | Status |
+|---|---|---|
+| 2016+ Tizen (`TokenAuthSupport: true`) | `wss://<tv>:8002` + token | **Verified.** The Allow prompt appears once, the token is saved, everything works |
+| 2014–15 Tizen (no token auth) | `ws://<tv>:8001`, no token | *Untested.* The client falls back to this automatically when 8002 refuses |
+| 2011–13 (pre-Tizen) | binary protocol on `:55000` | **Not supported.** Different protocol entirely |
+
+Run `tvctl discover` to see what your set reports:
+
+```
+192.168.100.59   55" QLED  (QN55Q8FAAFXZC)
+                 mac=94:e6:ba:a2:ea:85  token-auth=yes  remote=yes
+```
+
+`remote=yes` is the one that matters — it is the TV telling you it accepts
+remote keys.
+
+Individual features degrade independently, so a partly-supported TV is still
+useful:
+
+- **Keys** need the remote-control channel. Everything else is optional.
+- **The volume number** is read over UPnP `RenderingControl` on port 9197. If
+  your set does not answer, keys still work and the number shows `—`.
+- **App tiles** need `POST /api/v2/applications/<id>`. App ids are per-model,
+  so they are probed, never assumed — see below.
+- **Wake-on-LAN** needs network standby enabled on the TV.
+
+## Finding the TV
+
+`tvctl discover` sweeps the local /24 asking each address for `/api/v2/`. One
+Samsung TV is chosen automatically and remembered; several, and the panel asks
+which one on first launch. The address is cached in
+`~/.local/state/omarchy/tvremote-host`, and re-discovered if the TV moves.
+
+This is deliberately a TCP sweep rather than SSDP. SSDP is the documented way
+and it is one packet instead of 254, but its replies are unicast UDP from the
+TV to an ephemeral port, which conntrack does not treat as ESTABLISHED — so a
+default-deny firewall eats them silently and discovery "just doesn't work"
+with nothing in any log to explain it. The sweep is plain outbound TCP that
+any firewall already permits, and it takes about three seconds.
 
 ## Requirements
 
