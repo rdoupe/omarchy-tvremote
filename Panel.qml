@@ -35,6 +35,9 @@ Panel {
   // Device facts, refreshed by `tvctl state`.
   property bool reachable: false
   property bool paired: false
+  // Whether a MAC has been learned, which is what makes wake-on-LAN possible.
+  property bool canWake: false
+  property bool waking: false
   property string tvName: "TV"
   property string power: "unknown"
   property int volume: -1
@@ -127,6 +130,15 @@ Panel {
     Qt.callLater(function() { root.send("app:" + key) })
   }
 
+  // A TV that is off answers nothing on any port, so powering it on cannot
+  // go over the remote socket -- it takes a magic packet to the NIC, which
+  // stays listening while the set sleeps.
+  function wakeTv() {
+    waking = true
+    wakeTimeout.restart()
+    send("wake")
+  }
+
   function rescanApps() {
     scanning = true
     send("scan")
@@ -153,6 +165,8 @@ Panel {
     if (msg.type === "state") {
       reachable = !!msg.reachable
       paired = !!msg.paired
+      if (msg.canWake !== undefined) canWake = !!msg.canWake
+      if (reachable) waking = false
       tvName = String(msg.name || "TV")
       power = String(msg.power || "unknown")
       if (msg.volume !== undefined) volume = parseInt(msg.volume)
@@ -224,6 +238,12 @@ Panel {
 
   // Gives up on a launch that never showed up, so a tile cannot stay lit
   // because an app failed to come to the front.
+  Timer {
+    id: wakeTimeout
+    interval: 35000
+    onTriggered: root.waking = false
+  }
+
   Timer {
     id: launchTimeout
     interval: 5000
@@ -352,7 +372,9 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: !root.reachable ? "off or unreachable"
+              text: root.waking ? "waking…"
+                : !root.reachable ? (root.canWake ? "off — press ⏻ to wake"
+                                                  : "off or unreachable")
                 : root.errorText !== "" ? root.errorText
                 : !root.paired ? "waiting for Allow on the TV"
                 : root.linkUp ? "connected" : "connecting…"
@@ -371,9 +393,13 @@ Panel {
             iconText: "󰐥"
             iconSize: Style.font.icon
             foreground: root.fg
-            tooltipText: "Power"
-            active: root.lastKey === "power"
-            onClicked: root.press("power")
+            tooltipText: root.reachable ? "Power off"
+              : root.canWake ? "Wake the TV (wake-on-LAN)"
+              : "TV is off, and no MAC is known yet to wake it"
+            enabled: root.reachable || root.canWake
+            opacity: enabled ? 1 : 0.4
+            active: root.lastKey === "power" || root.waking
+            onClicked: root.reachable ? root.press("power") : root.wakeTv()
           }
         }
 
@@ -540,7 +566,8 @@ Panel {
         Text {
           textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
-          text: "− + · m to mute"
+          // The literal keys: volume up is the unshifted "=", not "+".
+          text: "- = · m to mute"
           color: Color.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

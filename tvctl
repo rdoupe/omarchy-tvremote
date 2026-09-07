@@ -39,6 +39,10 @@ UPNP_PORT = 9197
 CLIENT_NAME = os.environ.get("TV_NAME", "Omarchy")
 STATE_DIR = os.path.expanduser("~/.local/state/omarchy")
 TOKEN_FILE = os.path.join(STATE_DIR, "tvremote-token")
+# Learned from the TV while it is reachable, so it is still on hand when the
+# set is off -- which is exactly when it is needed, since a TV that is off
+# cannot be asked anything.
+MAC_FILE = os.path.join(STATE_DIR, "tvremote-mac")
 
 # Names the panel and the CLI use -> Tizen key codes.
 KEYS = {
@@ -404,6 +408,63 @@ def send_key(ws, name, cmd="Click"):
 # --------------------------------------------------------------- TV queries
 
 
+def load_mac():
+    mac = os.environ.get("TV_MAC", "")
+    if not mac:
+        try:
+            with open(MAC_FILE) as f:
+                mac = f.read().strip()
+        except OSError:
+            return ""
+    mac = re.sub(r"[^0-9A-Fa-f]", "", mac)
+    return mac if len(mac) == 12 else ""
+
+
+def save_mac(mac):
+    clean = re.sub(r"[^0-9A-Fa-f]", "", mac or "")
+    if len(clean) != 12 or clean == load_mac():
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(MAC_FILE, "w") as f:
+        f.write(clean)
+
+
+def wake(mac=None):
+    """Wake-on-LAN magic packet: 6 x 0xFF then the MAC repeated 16 times.
+
+    The remote-control socket is useless here -- a TV that is off answers
+    nothing on any port -- so powering on has to come from the NIC, which
+    stays listening. Sent to both the global and the subnet broadcast
+    address, on the two ports WoL is conventionally received on, because
+    which combination a given network passes varies.
+    """
+    mac = re.sub(r"[^0-9A-Fa-f]", "", mac or load_mac())
+    if len(mac) != 12:
+        raise ValueError("no MAC known for the TV; run `tvctl state` while it is on")
+    packet = b"\xff" * 6 + bytes.fromhex(mac) * 16
+
+    targets = ["255.255.255.255"]
+    parts = HOST.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        targets.append(".".join(parts[:3] + ["255"]))
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sent = 0
+    try:
+        for addr in targets:
+            for port in (9, 7):
+                for _ in range(3):        # cheap, and a lost packet is silent
+                    try:
+                        sock.sendto(packet, (addr, port))
+                        sent += 1
+                    except OSError:
+                        pass
+    finally:
+        sock.close()
+    return sent
+
+
 def soap(action, body, timeout=3):
     url = f"http://{HOST}:{UPNP_PORT}/upnp/control/RenderingControl1"
     service = "urn:schemas-upnp-org:service:RenderingControl:1"
@@ -451,6 +512,8 @@ def read_device(timeout=3):
     name = str(device.get("name") or "TV")
     # The TV HTML-escapes its own name, so '55" QLED' arrives as 55&quot; QLED.
     name = name.replace("&quot;", '"').replace("&amp;", "&").replace("&apos;", "'")
+    # Learn the MAC while we can, so wake-on-LAN works once it is off.
+    save_mac(device.get("wifiMac") or device.get("mac") or "")
     return {"name": name, "model": device.get("modelName", ""),
             "power": device.get("PowerState", "unknown")}
 
@@ -591,6 +654,7 @@ def state_payload(with_volume=True, with_app=True):
         "name": device["name"] if device else "TV",
         "model": device["model"] if device else "",
         "power": device["power"] if device else "off",
+        "canWake": bool(load_mac()),
     }
     if with_volume and device is not None:
         volume, muted = read_volume()
@@ -750,6 +814,9 @@ def serve():
                 threading.Thread(
                     target=lambda: emit(state_payload()), daemon=True).start()
                 continue
+            if cmd == "wake":
+                threading.Thread(target=_wake_and_watch, daemon=True).start()
+                continue
             if cmd == "apps":
                 emit({"type": "apps", "apps": load_apps()})
                 continue
@@ -837,6 +904,27 @@ def _deferred_app():
         emit({"type": "app", "app": app})
 
 
+def _wake_and_watch():
+    """Send the magic packet, then watch for the TV to come up.
+
+    A set takes some seconds to boot far enough to answer, so the panel is
+    told as soon as it does rather than waiting for the next poll.
+    """
+    try:
+        wake()
+    except Exception as exc:
+        emit({"type": "error", "msg": f"wake: {exc}"})
+        return
+    emit({"type": "ack", "key": "wake"})
+    for _ in range(15):
+        time.sleep(2)
+        payload = state_payload(with_app=False)
+        if payload["reachable"]:
+            emit(payload)
+            return
+    emit({"type": "error", "msg": "TV did not answer after wake"})
+
+
 def _scan_and_report():
     emit({"type": "scanning"})
     try:
@@ -886,7 +974,7 @@ def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip().splitlines()[0])
         print("usage: tvctl serve | state | apps | scan [--save] | app <name>"
-              " | hold <key> [secs] | <key>...")
+              " | wake | hold <key> [secs] | <key>...")
         print("keys:  " + " ".join(sorted(KEYS)))
         print("apps:  " + " ".join(a["key"] for a in load_apps()))
         return 0
@@ -895,6 +983,10 @@ def main(argv):
         return 0
     if argv[0] == "state":
         emit(state_payload())
+        return 0
+    if argv[0] == "wake":
+        n = wake(argv[1] if len(argv) > 1 else None)
+        print(f"sent {n} magic packets to {load_mac() or argv[1]}")
         return 0
     if argv[0] == "hold":
         # tvctl hold voldown 1.5 -- the CLI equivalent of holding the button.

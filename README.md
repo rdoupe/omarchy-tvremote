@@ -64,9 +64,10 @@ While the popup has focus:
 | arrows / `hjkl` | D-pad |
 | Enter / Space | OK |
 | Backspace / `b` | Back |
-| `+` / `-` | Volume |
+| `-` | Volume down |
 | `m` | Mute |
 | `1`-`9` | Launch the app on that tile |
+| `=` | Volume up (`+` works too) |
 | Esc | Close |
 
 The app numbers are positional — `3` is whatever sits in the third tile — so
@@ -135,6 +136,21 @@ cd ~/.config/omarchy/plugins/io.github.rdoupe.tvremote
 
 Keys: `up down left right enter back volup voldown mute home power`.
 Override the address with `TV_HOST=…`, the app file with `TV_APPS_FILE=…`.
+
+## Waking the TV
+
+A TV that is off answers nothing on any port, so the power button cannot
+reach it over the remote socket. `tvctl wake` sends a **wake-on-LAN magic
+packet** to the NIC instead, which keeps listening while the set sleeps.
+
+The MAC is learned automatically from `/api/v2/` whenever the TV is reachable
+and cached in `~/.local/state/omarchy/tvremote-mac`, so it is on hand later
+when the TV is off and cannot be asked. Override with `TV_MAC=…`.
+
+In the panel, the power button turns the TV off when it is on and wakes it
+when it is off. This needs **network standby** enabled on the TV (*Settings →
+General → Network → Expert Settings → Power On with Mobile*, wording varies by
+model); with it off, the NIC sleeps too and no packet can reach it.
 
 ## How it works
 
