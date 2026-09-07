@@ -583,9 +583,13 @@ Panel {
     opacity: muted ? 0.65 : 1
     bordered: true
     // Lit while the launch is in flight as well as once the TV confirms, so
-    // the tile responds on the click rather than on the round trip.
-    active: !!app && (root.foregroundApp === String(app.key)
-                      || root.launchingApp === String(app.key))
+    // the tile responds on the click rather than on the round trip. A launch
+    // in flight wins outright rather than adding to the foreground tile:
+    // otherwise the app being left and the app being opened are both lit for
+    // the second or two the TV takes to switch.
+    active: !!app && (root.launchingApp !== ""
+                      ? root.launchingApp === String(app.key)
+                      : root.foregroundApp === String(app.key))
     tooltipText: {
       if (!app) return ""
       var label = root.foregroundApp === String(app.key)
