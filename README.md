@@ -120,6 +120,23 @@ wake-on-LAN, and pairs.
 **unsandboxed inside the shell process**, with your full user permissions —
 read the source of anything you install, including this.
 
+### Uninstall
+
+```bash
+omarchy plugin remove io.github.rdoupe.tvremote
+rm -f ~/.local/state/omarchy/tvremote-{token,host,mac,lastapp}
+rm -f ~/.config/omarchy/tvremote-apps.json
+```
+
+`omarchy plugin remove` deletes the plugin directory but does not edit your
+bar layout, so also drop the `io.github.rdoupe.tvremote` entry from
+`~/.config/omarchy/shell.json` to tidy up.
+
+That removes everything this ever wrote. To finish the job on the TV itself,
+remove **Omarchy** from *Settings → General → External Device Manager →
+Device Connect Manager → Device List*, which is where the TV records that it
+trusts this client.
+
 ### First run
 
 Opening the panel is all it takes. Measured on a wiped install:
