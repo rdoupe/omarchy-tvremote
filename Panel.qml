@@ -537,7 +537,12 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: "This widget needs python3, and tvctl must be executable:"
+            // No install command here on purpose: python3 is guaranteed on
+            // Omarchy (omarchy -> uwsm -> python), so a missing interpreter
+            // is not the likely cause, and shipping a privileged command in
+            // a plugin earns a manual review it does not need.
+            text: "It needs python3 on PATH, and tvctl must be executable. "
+                  + "Check the helper, then try again:"
             color: Color.muted
             width: parent.width
             wrapMode: Text.WordWrap
@@ -547,7 +552,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: "sudo pacman -S --needed python\nchmod +x " + root.helper
+            text: "chmod +x " + root.helper
             color: root.fg
             width: parent.width
             wrapMode: Text.WrapAnywhere
