@@ -441,6 +441,16 @@ Panel {
         else if (text === "+" || text === "=") root.press("volup")
         else if (text === "-" || text === "_") root.press("voldown")
         else if (text === "m") root.press("mute")
+        else if (text === "p") {
+          // Same path as the power button click: off when reachable, else wake.
+          if (root.reachable) {
+            root.poweringOff = true
+            powerOffTimeout.restart()
+            root.press("power")
+          } else if (root.canWake) {
+            root.wakeTv("")
+          }
+        }
         else if (text >= "1" && text <= "9") root.launchNth(parseInt(text))
       }
 
@@ -499,8 +509,8 @@ Panel {
             iconText: "󰐥"
             iconSize: Style.font.icon
             foreground: root.fg
-            tooltipText: root.reachable ? "Power off"
-              : root.canWake ? "Wake the TV (wake-on-LAN)"
+            tooltipText: root.reachable ? "Power off  (p)"
+              : root.canWake ? "Wake the TV (wake-on-LAN)  (p)"
               : "TV is off, and no MAC is known yet to wake it"
             enabled: root.reachable || root.canWake
             opacity: enabled ? 1 : 0.4
@@ -513,6 +523,18 @@ Panel {
               } else {
                 root.wakeTv("")
               }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              text: "p"
+              color: Color.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.leftMargin: Style.space(4)
+              anchors.topMargin: Style.space(1)
             }
           }
         }
@@ -806,31 +828,20 @@ Panel {
           spacing: Style.space(4)
 
           Item { width: root.keySize; height: root.keySize }
-          RemoteKey { key: "up"; glyph: "󰅃" }
+          RemoteKey { key: "up"; glyph: "󰅃"; tip: "Up" }
           Item { width: root.keySize; height: root.keySize }
 
-          RemoteKey { key: "left"; glyph: "󰅁" }
-          RemoteKey { key: "enter"; glyph: ""; label: "OK" }
-          RemoteKey { key: "right"; glyph: "󰅂" }
+          RemoteKey { key: "left"; glyph: "󰅁"; tip: "Left" }
+          RemoteKey { key: "enter"; glyph: ""; label: "OK"; tip: "OK  (Enter)" }
+          RemoteKey { key: "right"; glyph: "󰅂"; tip: "Right" }
 
           Item { width: root.keySize; height: root.keySize }
-          RemoteKey { key: "down"; glyph: "󰅀" }
-          RemoteKey { key: "back"; glyph: "󰌑"; tip: "Back  (Backspace)" }
+          RemoteKey { key: "down"; glyph: "󰅀"; tip: "Down" }
+          RemoteKey { key: "back"; glyph: "󰌑"; tip: "Back  (Backspace)"; shortcutHint: "⌫" }
         }
 
-        // Each hint sits under the row it describes rather than in one legend
-        // at the foot of the panel, so it is read next to the buttons it is
-        // about. The app tiles need no line of their own -- they carry their
-        // numbers.
-        Text {
-          textFormat: Text.PlainText
-          visible: !root.blocked
-          anchors.horizontalCenter: parent.horizontalCenter
-          text: "arrows · enter · backspace"
-          color: Color.muted
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-        }
+        // Shortcut hints live on the buttons themselves (same corner style as
+        // the app-tile numbers), so the under-row legend lines are gone.
 
         // ---------- volume ----------
         Row {
@@ -838,11 +849,25 @@ Panel {
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: Style.space(4)
 
-          RemoteKey { key: "voldown"; glyph: "󰍴"; tip: "Volume down  (−)" }
+          RemoteKey { key: "voldown"; glyph: "󰍴"; tip: "Volume down  (−)"; shortcutHint: "-" }
 
           Item {
             width: root.keySize
             height: root.keySize
+
+            // Mute shortcut hint — same corner caption style as AppTile numbers.
+            Text {
+              textFormat: Text.PlainText
+              text: "m"
+              color: Color.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.leftMargin: Style.space(4)
+              anchors.topMargin: Style.space(1)
+              z: 1
+            }
 
             Column {
               anchors.centerIn: parent
@@ -874,18 +899,8 @@ Panel {
             }
           }
 
-          RemoteKey { key: "volup"; glyph: "󰐕"; tip: "Volume up  (+)" }
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          anchors.horizontalCenter: parent.horizontalCenter
-          visible: !root.blocked
-          // The literal keys: volume up is the unshifted "=", not "+".
-          text: "- = · m to mute"
-          color: Color.muted
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          // Display "=" (unshifted key); onTextKey still accepts "+" too.
+          RemoteKey { key: "volup"; glyph: "󰐕"; tip: "Volume up  (=)"; shortcutHint: "=" }
         }
       }
     }
@@ -996,6 +1011,8 @@ Panel {
     property string glyph: ""
     property string label: ""
     property string tip: ""
+    // Optional corner caption, same style as AppTile's number hint.
+    property string shortcutHint: ""
 
     width: root.keySize
     height: root.keySize
@@ -1012,6 +1029,20 @@ Panel {
       id: keyPulse
       NumberAnimation { target: keyButton; property: "scale"; to: 0.93; duration: 60 }
       NumberAnimation { target: keyButton; property: "scale"; to: 1.0; duration: 100 }
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      visible: keyButton.shortcutHint !== ""
+      text: keyButton.shortcutHint
+      color: Color.muted
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.leftMargin: Style.space(4)
+      anchors.topMargin: Style.space(1)
+      z: 1
     }
 
     // Sits above Button's own MouseArea so a press and its release both land
