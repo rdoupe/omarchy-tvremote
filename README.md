@@ -201,15 +201,16 @@ While the popup has focus:
 | Enter / Space | OK |
 | Backspace / `b` | Back |
 | `-` | Volume down |
-| `m` | Mute |
-| `1`-`9` | Launch the app on that tile |
 | `=` | Volume up (`+` works too) |
+| `m` | Mute |
+| `p` | Power (off when reachable; wake otherwise) |
+| `1`-`9` | Launch the app on that tile |
 | Esc | Close |
 
 The app numbers are positional — `3` is whatever sits in the third tile — so
-they keep working when a rescan changes the list. Each tile shows its number,
-and each row of the panel carries its own hint underneath, rather than one
-legend at the foot describing controls further up.
+they keep working when a rescan changes the list. Shortcut hints sit in the
+button corners (same muted caption style as the app-tile numbers), including
+`p` on power, `=` / `-` on volume, and `m` on mute.
 
 ## Apps
 
