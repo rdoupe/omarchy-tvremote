@@ -46,6 +46,13 @@ Panel {
   // list appearing means there were several (or none).
   property var tvChoices: []
   readonly property bool picking: tvChoices.length > 0
+  // The TV is answering but has not authorised us: the Allow prompt is on
+  // screen right now and nothing else will work until it is answered.
+  readonly property bool needsPairing: reachable && !paired
+  // Nothing below the header is usable in either state.
+  readonly property bool blocked: picking || needsPairing
+  property string wakeTarget: ""
+  property bool poweringOff: false
   property string tvName: "TV"
   property string power: "unknown"
   property int volume: -1
@@ -129,6 +136,12 @@ Panel {
   }
 
   function launchApp(key) {
+    // A tile clicked on a sleeping TV is a request to turn it on and open
+    // that app, not an error.
+    if (!reachable && canWake) {
+      wakeTv(key)
+      return
+    }
     lastKey = "app:" + key
     launchingApp = key
     launchTimeout.restart()
@@ -141,20 +154,32 @@ Panel {
   // A TV that is off answers nothing on any port, so powering it on cannot
   // go over the remote socket -- it takes a magic packet to the NIC, which
   // stays listening while the set sleeps.
-  function wakeTv() {
+  // `app` turns "the TV is off" into "open Netflix": wake it, then go
+  // straight there, which is what clicking a tile on a sleeping TV means.
+  function wakeTv(app) {
     waking = true
     wakeStage = ""
+    wakeTarget = app || ""
     wakeTimeout.restart()
-    send("wake")
+    send(app ? ("wake:" + app) : "wake")
   }
 
   // The whole sequence -- packet, boot, power key, reopening the last app --
   // runs to about a minute on this set, so the giving-up point is generous.
   readonly property string wakeLabel: {
+    if (wakeStage === "resume") {
+      var app = appName(wakeTarget)
+      return app ? "opening " + app + "…" : "reopening your last app…"
+    }
     if (wakeStage === "network") return "waking… TV is in standby"
     if (wakeStage === "power") return "waking… turning the screen on"
-    if (wakeStage === "resume") return "reopening your last app…"
     return "waking… this takes about a minute"
+  }
+
+  function appName(key) {
+    for (var i = 0; i < apps.length; i++)
+      if (String(apps[i].key) === key) return String(apps[i].name)
+    return ""
   }
 
   function pickTv(ip) {
@@ -194,6 +219,7 @@ Panel {
       reachable = !!msg.reachable
       paired = !!msg.paired
       if (msg.canWake !== undefined) canWake = !!msg.canWake
+      if (!reachable || power !== "on") poweringOff = false
       // Not merely "reachable": the magic packet makes the TV answer while
       // it is still in standby with the screen off, so the wake is not done
       // until it actually reports itself on.
@@ -280,6 +306,12 @@ Panel {
 
   // Gives up on a launch that never showed up, so a tile cannot stay lit
   // because an app failed to come to the front.
+  Timer {
+    id: powerOffTimeout
+    interval: 20000
+    onTriggered: root.poweringOff = false
+  }
+
   Timer {
     id: wakeTimeout
     interval: 90000
@@ -415,10 +447,12 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: root.waking ? root.wakeLabel
-                : !root.reachable ? (root.canWake ? "off — press ⏻ to wake"
-                                                  : "off or unreachable")
+                : root.poweringOff ? "turning off " + root.tvName + "…"
+                : !root.reachable ? (root.canWake
+                    ? "off — press ⏻ or an app to turn it on"
+                    : "off or unreachable")
+                : root.needsPairing ? "waiting for you to allow it"
                 : root.errorText !== "" ? root.errorText
-                : !root.paired ? "waiting for Allow on the TV"
                 : root.linkUp ? "connected" : "connecting…"
               color: root.errorText !== "" || !root.reachable ? Color.urgent : Color.muted
               elide: Text.ElideRight
@@ -441,7 +475,67 @@ Panel {
             enabled: root.reachable || root.canWake
             opacity: enabled ? 1 : 0.4
             active: root.lastKey === "power" || root.waking
-            onClicked: root.reachable ? root.press("power") : root.wakeTv()
+            onClicked: {
+              if (root.reachable) {
+                root.poweringOff = true
+                powerOffTimeout.restart()
+                root.press("power")
+              } else {
+                root.wakeTv("")
+              }
+            }
+          }
+        }
+
+        // ---------- waiting to be allowed on the TV ----------
+        // The prompt is on the TV, not here, and there is nothing to click in
+        // this panel that will help -- so the panel says where to look rather
+        // than showing a remote that cannot work yet.
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.needsPairing
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Look at your TV"
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle
+            font.bold: true
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Press Allow on the prompt to let this remote control "
+                  + root.tvName + "."
+            color: Color.muted
+            width: parent.width
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            text: "No prompt? It may have been denied before — clear this "
+                  + "device under Settings → General → External Device "
+                  + "Manager → Device Connect Manager."
+            color: Color.muted
+            width: parent.width
+            wrapMode: Text.WordWrap
+            opacity: 0.75
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Button {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: "ask again"
+            fontSize: Style.font.caption
+            foreground: root.fg
+            bordered: true
+            onClicked: root.send("reconnect")
           }
         }
 
@@ -494,7 +588,7 @@ Panel {
         Column {
           width: parent.width
           spacing: Style.space(4)
-          visible: root.apps.length > 0 && !root.picking
+          visible: root.apps.length > 0 && !root.blocked
 
           AppTile {
             app: root.pinnedApps.length > 0 ? root.pinnedApps[0] : null
@@ -572,7 +666,7 @@ Panel {
 
         // ---------- D-pad ----------
         Grid {
-          visible: !root.picking
+          visible: !root.blocked
           anchors.horizontalCenter: parent.horizontalCenter
           columns: 3
           spacing: Style.space(4)
@@ -596,7 +690,7 @@ Panel {
         // numbers.
         Text {
           textFormat: Text.PlainText
-          visible: !root.picking
+          visible: !root.blocked
           anchors.horizontalCenter: parent.horizontalCenter
           text: "arrows · enter · backspace"
           color: Color.muted
@@ -606,7 +700,7 @@ Panel {
 
         // ---------- volume ----------
         Row {
-          visible: !root.picking
+          visible: !root.blocked
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: Style.space(4)
 
@@ -652,7 +746,7 @@ Panel {
         Text {
           textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
-          visible: !root.picking
+          visible: !root.blocked
           // The literal keys: volume up is the unshifted "=", not "+".
           text: "- = · m to mute"
           color: Color.muted

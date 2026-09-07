@@ -222,7 +222,10 @@ and cached in `~/.local/state/omarchy/tvremote-mac`, so it is on hand later
 when the TV is off and cannot be asked. Override with `TV_MAC=…`.
 
 In the panel, the power button turns the TV off when it is on and wakes it
-when it is off. This needs **network standby** enabled on the TV (*Settings →
+when it is off — and **clicking an app tile on a sleeping TV wakes it and
+opens that app**, which is what clicking Netflix on a dark screen plainly
+means. The status line says so rather than leaving you to guess: *"off —
+press ⏻ or an app to turn it on"*. This needs **network standby** enabled on the TV (*Settings →
 General → Network → Expert Settings → Power On with Mobile*, wording varies by
 model); with it off, the NIC sleeps too and no packet can reach it.
 

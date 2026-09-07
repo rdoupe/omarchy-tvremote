@@ -1115,9 +1115,19 @@ def serve():
             if cmd == "rediscover":
                 threading.Thread(target=_rediscover, daemon=True).start()
                 continue
-            if cmd == "wake":
+            if cmd == "reconnect":
+                threading.Thread(target=_warm, args=(server,), daemon=True).start()
+                continue
+            if cmd == "wake" or cmd.startswith("wake:"):
+                # "wake:youtube" means the user clicked an app while the TV
+                # was off: turn it on, then open that app rather than
+                # whatever happened to be on screen last.
+                target = cmd[5:] if cmd.startswith("wake:") else ""
+                if target and app_by_key(target) is None:
+                    emit({"type": "error", "msg": f"unknown app: {target}"})
+                    continue
                 threading.Thread(target=_wake_and_watch,
-                                 args=(server,), daemon=True).start()
+                                 args=(server, target), daemon=True).start()
                 continue
             if cmd == "apps":
                 emit({"type": "apps", "apps": load_apps()})
@@ -1212,11 +1222,12 @@ def _rediscover():
     emit({"type": "tvs", "tvs": DISCOVERED})
 
 
-def _wake_and_watch(server):
+def _wake_and_watch(server, target=""):
     """Full power-on, reporting each stage so the panel can say where it is.
 
-    Finishes by reopening whatever was last on screen: a TV woken from the
-    network lands on the home screen, which is never where you left off.
+    Finishes by opening an app: the one asked for, or failing that whatever
+    was last on screen. A TV woken from the network lands on the home
+    screen, which is never where you left off.
     """
     def progress(stage):
         emit({"type": "waking", "stage": stage})
@@ -1233,17 +1244,19 @@ def _wake_and_watch(server):
         emit(state_payload(with_app=False))
         return
 
-    last = load_last_app()
-    if RESUME_APP and last and app_by_key(last):
-        emit({"type": "waking", "stage": "resume", "app": last})
+    # An explicitly asked-for app always wins over the remembered one, and is
+    # opened even when resuming is switched off -- the user just clicked it.
+    wanted = target or (load_last_app() if RESUME_APP else "")
+    if wanted and app_by_key(wanted):
+        emit({"type": "waking", "stage": "resume", "app": wanted})
         for attempt in range(3):
             time.sleep(3)                 # the TV refuses launches while booting
             try:
-                launch_app(last)
+                launch_app(wanted)
                 break
             except Exception:
                 if attempt == 2:
-                    emit({"type": "error", "msg": f"could not reopen {last}"})
+                    emit({"type": "error", "msg": f"could not open {wanted}"})
         time.sleep(2)
     emit(state_payload())
 
