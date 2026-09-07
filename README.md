@@ -183,13 +183,21 @@ name the TV has not seen (`TV_NAME=…`) or remove the entry on the TV under
 Device List*. That list is also where to look if the prompt never appears —
 the device was probably denied once, and the TV will not ask again.
 
-Optional keybinding — opens the popup already focused, so the arrow keys are
-live immediately:
+### Keybinding
+
+Omarchy plugins cannot declare their own hotkeys — the manifest schema has no
+field for one, and Hyprland bindings live in your config rather than in a
+package. So this is a line for `~/.config/hypr/bindings.lua`, not something
+the install does for you:
 
 ```lua
-o.bind("SUPER + CTRL + SHIFT + S", "Samsung TV Remote",
+o.bind("SUPER + R", "Samsung TV Remote",
        "omarchy-shell io.github.rdoupe.tvremote toggle")
 ```
+
+`SUPER + R` for *remote*; pick whatever is free on your setup. The binding
+opens the popup already focused, so the arrow keys drive the TV immediately.
+Run `hyprctl reload` to pick it up without logging out.
 
 ## Keyboard
 

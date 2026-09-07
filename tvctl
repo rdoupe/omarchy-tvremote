@@ -394,12 +394,16 @@ def channel_endpoints():
     return [(WS_PORT, True), (API_PORT, False)]
 
 
-def connect(timeout=8):
+def connect(timeout=8, _after_pairing=False):
     """Open the remote-control channel. Returns (socket, newly_paired).
 
     Without a saved token the TV puts an Allow/Deny prompt on screen and says
     nothing until someone answers it with the physical remote, so the first
     connect gets a long read timeout and every later one does not.
+
+    `_after_pairing` marks the one reconnect this may make on its own, and
+    caps it at one: the TV hands over a token and then drops the socket, so
+    the useful connection is the *next* one.
     """
     token = load_token()
     path = ("/api/v2/channels/samsung.remote.control?name="
@@ -433,7 +437,17 @@ def connect(timeout=8):
                 ws.sock.settimeout(timeout)
                 if issued and issued != token:
                     save_token(issued)
-                    return ws, True
+                    # The tokenless connection exists only to raise the
+                    # prompt: moments after issuing a token the TV hangs it
+                    # up. Waiting for that close to arrive left the panel
+                    # reading "connecting..." until some later keypress
+                    # happened to notice, so spend the reconnect now, while
+                    # the caller is still inside connect() and one clean
+                    # result can be reported for the whole pairing.
+                    if _after_pairing:
+                        return ws, True
+                    ws.close()
+                    return connect(timeout, _after_pairing=True)[0], True
                 return ws, False
             if event in ("ms.channel.unauthorized", "ms.error"):
                 raise PermissionError("TV denied the connection: " + json.dumps(msg))
@@ -1022,6 +1036,15 @@ class Server:
             with self.lock:
                 if self.ws is not None:
                     return self.ws
+            # No token means the TV is about to put an Allow/Deny prompt on
+            # screen and then say nothing at all until someone walks over and
+            # answers it. The panel has to know that wait has started: the
+            # prompt lives exactly as long as the connection that raised it,
+            # so a panel that quits this child on losing focus dismisses the
+            # very prompt it asked for.
+            prompting = not load_token()
+            if prompting:
+                emit({"type": "pairing"})
             ws, newly_paired = connect()
             with self.lock:
                 self.generation += 1
@@ -1031,6 +1054,13 @@ class Server:
                 target=self._drain, args=(ws, generation), daemon=True)
             self.reader.start()
             emit({"type": "connected", "paired_now": newly_paired})
+            if prompting:
+                # The panel's `paired` comes only from a state poll, and that
+                # poll is switched off while the popup is open -- so without
+                # this the "Look at your TV" screen outlived the pairing it
+                # was waiting for, and answering the prompt looked ignored.
+                threading.Thread(
+                    target=lambda: emit(state_payload()), daemon=True).start()
             return ws
 
     def key(self, name, cmd="Click"):

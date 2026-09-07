@@ -52,6 +52,19 @@ Panel {
   // The TV is answering but has not authorised us: the Allow prompt is on
   // screen right now and nothing else will work until it is answered.
   readonly property bool needsPairing: reachable && !paired
+  // The hotkey the user bound to this widget, read back from Hyprland rather
+  // than hardcoded: a plugin cannot ship a binding (the manifest schema has
+  // no field for one), so the only honest source for the hint is whatever is
+  // actually bound right now. Empty means nothing is, and the hint stays off
+  // rather than advertising a key that would do nothing.
+  property string hotkey: ""
+  property bool hotkeyChecked: false
+
+  // A tokenless connect is in flight: the Allow/Deny prompt is on the TV
+  // screen this second, and nothing comes back until someone answers it
+  // there. Tracked because the prompt lives exactly as long as the
+  // connection that raised it -- see closeDaemonIfIdle().
+  property bool pairing: false
   // Nothing below the header is usable in either state.
   readonly property bool blocked: picking || needsPairing || helperBroken
   property string wakeTarget: ""
@@ -231,7 +244,11 @@ Panel {
     }
     if (msg.type === "state") {
       reachable = !!msg.reachable
-      paired = !!msg.paired
+      // A live remote socket is itself proof of authorisation: the TV sends
+      // ms.channel.connect only once it has allowed us, and 2015 sets allow
+      // with no token to show for it. So a poll may raise this but never
+      // lower it under a working connection.
+      paired = !!msg.paired || linkUp
       if (msg.canWake !== undefined) canWake = !!msg.canWake
       if (!reachable || power !== "on") poweringOff = false
       // Not merely "reachable": the magic packet makes the TV answer while
@@ -268,13 +285,31 @@ Panel {
       scanning = true
     } else if (msg.type === "app") {
       foregroundApp = String(msg.app || "")
+    } else if (msg.type === "pairing") {
+      pairing = true
+      pairingTimeout.restart()
     } else if (msg.type === "connected") {
       linkUp = true
       errorText = ""
+      pairing = false
+      pairingTimeout.stop()
+      // Pressing Allow on the TV used to change nothing here: `paired` moved
+      // only on a state poll, and that poll is off while the popup is open
+      // (see the timer below), so the "Look at your TV" screen outlived the
+      // pairing it was asking for. The only way out was to close the panel
+      // and wait a minute -- which is why this took three tries. The socket
+      // being up is all the proof needed, so say so immediately and ask for
+      // the authoritative state behind it.
+      if (msg.paired_now || !paired) {
+        paired = true
+        send("state")
+      }
     } else if (msg.type === "disconnected") {
       linkUp = false
     } else if (msg.type === "error") {
       errorText = String(msg.msg || "")
+      pairing = false
+      pairingTimeout.stop()
       scanning = false
     }
   }
@@ -299,6 +334,55 @@ Panel {
       // itself is missing, not a TV problem.
       if (!root.helperSpoke && exitCode !== 0) root.helperBroken = true
     }
+  }
+
+  // Hyprland's own bind table is the source of truth. Matched on the bind's
+  // description, because Omarchy routes its bindings through a Lua dispatcher
+  // whose arg is an opaque table index -- the command string is not in there
+  // to match on.
+  Process {
+    id: hotkeyProc
+    command: ["hyprctl", "binds", "-j"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.readHotkey(text)
+    }
+  }
+
+  function readHotkey(payload) {
+    root.hotkeyChecked = true
+    var binds
+    try {
+      binds = JSON.parse(payload)
+    } catch (e) {
+      return
+    }
+    if (!Array.isArray(binds)) return
+    for (var i = 0; i < binds.length; i++) {
+      var b = binds[i]
+      var desc = String(b.description || "").toLowerCase()
+      var arg = String(b.arg || "")
+      // Either the description names this remote, or the binding runs the
+      // plugin directly (a plain exec rather than through Omarchy's Lua).
+      if (desc.indexOf("tv remote") < 0 && arg.indexOf(root.moduleName) < 0) continue
+      var label = root.describeBind(b)
+      if (label !== "") { root.hotkey = label; return }
+    }
+  }
+
+  // modmask is an X11 modifier bitfield. Ordered the way the binding is
+  // written in hypr/bindings.lua, so the hint can be copied straight back.
+  function describeBind(b) {
+    var key = String(b.key || "")
+    if (key === "") return ""
+    var mask = parseInt(b.modmask) || 0
+    var parts = []
+    if (mask & 64) parts.push("SUPER")
+    if (mask & 4) parts.push("CTRL")
+    if (mask & 8) parts.push("ALT")
+    if (mask & 1) parts.push("SHIFT")
+    parts.push(key.length === 1 ? key.toUpperCase() : key)
+    return parts.join(" + ")
   }
 
   // Cheap liveness for the bar tooltip while the panel is closed: an HTTP GET
@@ -345,17 +429,43 @@ Panel {
     onTriggered: root.launchingApp = ""
   }
 
+  // tvctl gives a tokenless connect a 25s handshake and a 45s read, so a
+  // prompt resolves well inside this. The timer is only here so that a child
+  // which somehow says nothing at all cannot pin itself open for good.
+  Timer {
+    id: pairingTimeout
+    interval: 120000
+    onTriggered: root.pairing = false
+  }
+
   onForegroundAppChanged: if (foregroundApp === launchingApp) launchingApp = ""
 
-  // Closing up after a wake that outlived the popup.
-  onWakingChanged: {
-    if (!waking && !opened && daemon.running) daemon.write("quit\n")
+  // The child outlives a closed popup in exactly two cases. A wake is a
+  // minute-long sequence -- magic packet, boot, power key, reopening the app
+  // -- that quitting would strand halfway. And a pairing prompt lives only as
+  // long as the connection that raised it, so quitting while it is on screen
+  // dismisses the prompt the user is walking across the room to answer.
+  // Both resolve on their own, and both call back here when they do.
+  function closeDaemonIfIdle() {
+    if (opened || waking || pairing) return
+    if (daemon.running) daemon.write("quit\n")
+    linkUp = false
   }
+
+  onWakingChanged: closeDaemonIfIdle()
+  onPairingChanged: closeDaemonIfIdle()
 
   onOpenedChanged: {
     if (opened) {
       errorText = ""
+      // A child kept alive through a pairing prompt or a wake is already
+      // connected and will not announce itself again, so ask it where things
+      // stand rather than showing a stale picture.
       if (!daemon.running) daemon.running = true
+      else send("state")
+      // Once per shell session: the binding does not change under us, and
+      // the bind table is a few thousand lines to parse.
+      if (!hotkeyChecked && !hotkeyProc.running) hotkeyProc.running = true
     } else {
       // Never leave a key down: the TV would keep repeating with the panel
       // gone. (tvctl releases on exit too, but the panel should not rely on
@@ -365,8 +475,7 @@ Panel {
       // reopening the app -- and quitting the helper mid-way kills the
       // daemon thread running it, leaving the TV stranded in standby with
       // the packet already sent. Let it finish; onWakingChanged closes up.
-      if (daemon.running && !waking) daemon.write("quit\n")
-      linkUp = false
+      closeDaemonIfIdle()
     }
   }
 
@@ -683,14 +792,33 @@ Panel {
             opacity: 0.75
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+            visible: !root.pairing
           }
 
+          // While a prompt is genuinely up, the only useful thing this panel
+          // can do is stay out of the way and keep the connection alive.
+          Text {
+            textFormat: Text.PlainText
+            text: "Waiting for the TV… take your time, this stays open."
+            color: Color.muted
+            width: parent.width
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            visible: root.pairing
+          }
+
+          // Deliberately hidden while a prompt is live. Asking again opens a
+          // second connection, and the TV dismisses the pending prompt when
+          // it does -- so this button, pressed during the wait it appears in,
+          // was cancelling the very thing the user was about to allow.
           Button {
             anchors.horizontalCenter: parent.horizontalCenter
             text: "ask again"
             fontSize: Style.font.caption
             foreground: root.fg
             bordered: true
+            visible: !root.pairing
             onClicked: root.send("reconnect")
           }
         }
@@ -901,6 +1029,22 @@ Panel {
 
           // Display "=" (unshifted key); onTextKey still accepts "+" too.
           RemoteKey { key: "volup"; glyph: "󰐕"; tip: "Volume up  (=)"; shortcutHint: "=" }
+        }
+
+        // ---------- how to get back here ----------
+        // The whole point of the widget is that the popup takes the keyboard,
+        // so the one shortcut that is not printed on a button is the one that
+        // opens it. Shown only when something really is bound (read back from
+        // Hyprland), in the same muted caption style as the button hints.
+        Text {
+          textFormat: Text.PlainText
+          visible: root.hotkey !== "" && !root.blocked
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: root.hotkey + "  ·  opens this"
+          color: Color.muted
+          opacity: 0.75
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
       }
     }
