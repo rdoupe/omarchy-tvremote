@@ -1240,7 +1240,10 @@ def _wake_and_watch(server, target=""):
         emit({"type": "error", "msg": f"wake: {exc}"})
         return
     if not ok:
-        emit({"type": "error", "msg": "TV did not come on after wake"})
+        # Almost always one specific TV setting rather than a bug, so say
+        # which one instead of reporting a bare failure.
+        emit({"type": "wakefailed",
+              "reachable": read_device(timeout=2) is not None})
         emit(state_payload(with_app=False))
         return
 

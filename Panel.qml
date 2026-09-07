@@ -50,9 +50,17 @@ Panel {
   // screen right now and nothing else will work until it is answered.
   readonly property bool needsPairing: reachable && !paired
   // Nothing below the header is usable in either state.
-  readonly property bool blocked: picking || needsPairing
+  readonly property bool blocked: picking || needsPairing || helperBroken
   property string wakeTarget: ""
   property bool poweringOff: false
+  // Set when a wake ran its full course and the TV still did not come on --
+  // nearly always one TV setting rather than a fault, so the panel offers
+  // the fix instead of an error.
+  property bool wakeFailed: false
+  // The helper never produced a line and exited: the widget cannot work, and
+  // saying so beats a permanently blank panel.
+  property bool helperBroken: false
+  property bool helperSpoke: false
   property string tvName: "TV"
   property string power: "unknown"
   property int volume: -1
@@ -157,6 +165,7 @@ Panel {
   // `app` turns "the TV is off" into "open Netflix": wake it, then go
   // straight there, which is what clicking a tile on a sleeping TV means.
   function wakeTv(app) {
+    wakeFailed = false
     waking = true
     wakeStage = ""
     wakeTarget = app || ""
@@ -209,6 +218,8 @@ Panel {
   }
 
   function handleLine(line) {
+    helperSpoke = true
+    helperBroken = false
     var msg
     try {
       msg = JSON.parse(line)
@@ -239,6 +250,10 @@ Panel {
     } else if (msg.type === "picked") {
       tvChoices = []
       tvName = String(msg.name || "TV")
+    } else if (msg.type === "wakefailed") {
+      wakeFailed = true
+      waking = false
+      wakeStage = ""
     } else if (msg.type === "waking") {
       waking = true
       wakeStage = String(msg.stage || "")
@@ -274,9 +289,12 @@ Panel {
       root.pendingKeys = []
       for (var i = 0; i < queue.length; i++) daemon.write(queue[i] + "\n")
     }
-    onExited: {
+    onExited: function(exitCode) {
       root.linkUp = false
       root.pendingKeys = []
+      // Exited without ever saying anything: the interpreter or the helper
+      // itself is missing, not a TV problem.
+      if (!root.helperSpoke && exitCode !== 0) root.helperBroken = true
     }
   }
 
@@ -483,6 +501,105 @@ Panel {
               } else {
                 root.wakeTv("")
               }
+            }
+          }
+        }
+
+        // ---------- the helper cannot run ----------
+        // python3 is pulled in by uwsm, which Omarchy requires, so this
+        // should never fire -- but a widget that silently does nothing is
+        // the worst way to find out otherwise.
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.helperBroken
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Can't start the helper"
+            color: Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle
+            font.bold: true
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            text: "This widget needs python3, and tvctl must be executable:"
+            color: Color.muted
+            width: parent.width
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            text: "sudo pacman -S --needed python\nchmod +x " + root.helper
+            color: root.fg
+            width: parent.width
+            wrapMode: Text.WrapAnywhere
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Button {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: "try again"
+            fontSize: Style.font.caption
+            foreground: root.fg
+            bordered: true
+            onClicked: { root.helperBroken = false; root.send("state") }
+          }
+        }
+
+        // ---------- the TV would not wake ----------
+        // Wake-on-LAN needs the TV's own network-standby setting, which ships
+        // off on many sets. That is a setting, not a fault, so the panel says
+        // which one rather than reporting failure.
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.wakeFailed && !root.blocked
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Couldn't wake " + root.tvName
+            color: Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Turn on network standby so the TV keeps listening while "
+                  + "it sleeps:\nSettings → General → Network → Expert "
+                  + "Settings → Power On with Mobile."
+            color: Color.muted
+            width: parent.width
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Row {
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: Style.space(6)
+
+            Button {
+              text: "try again"
+              fontSize: Style.font.caption
+              foreground: root.fg
+              bordered: true
+              onClicked: root.wakeTv("")
+            }
+
+            Button {
+              text: "dismiss"
+              fontSize: Style.font.caption
+              foreground: Color.muted
+              onClicked: root.wakeFailed = false
             }
           }
         }

@@ -20,36 +20,73 @@ whatever else is installed.
 
 ## Which TVs does this support?
 
-Verified end to end on exactly one set: **QN55Q8FAAFXZC** (2017 QLED, Tizen
-2.0.25, firmware reported as "Unknown"). Everything below that is not marked
-*verified* is reasoned from the protocol, not tested — if you try it on
-another model, please open an issue saying what worked.
+**Short answer: Samsung Tizen smart TVs, 2016 and newer.** Those are the sets
+with the token-authenticated remote channel this uses.
 
-| Era | Channel | Status |
-|---|---|---|
-| 2016+ Tizen (`TokenAuthSupport: true`) | `wss://<tv>:8002` + token | **Verified.** The Allow prompt appears once, the token is saved, everything works |
-| 2014–15 Tizen (no token auth) | `ws://<tv>:8001`, no token | *Untested.* The client falls back to this automatically when 8002 refuses |
-| 2011–13 (pre-Tizen) | binary protocol on `:55000` | **Not supported.** Different protocol entirely |
+**The reliable test takes three seconds** — no model-number archaeology
+required:
 
-Run `tvctl discover` to see what your set reports:
+```bash
+./tvctl discover
+```
 
 ```
 192.168.100.59   55" QLED  (QN55Q8FAAFXZC)
                  mac=94:e6:ba:a2:ea:85  token-auth=yes  remote=yes
 ```
 
-`remote=yes` is the one that matters — it is the TV telling you it accepts
-remote keys.
+`remote=yes` is the TV itself saying it accepts remote keys. If you see that,
+this will work. If the TV does not appear at all, it is either off, on another
+subnet, or too old to have the HTTP API.
 
-Individual features degrade independently, so a partly-supported TV is still
-useful:
+| Era | Model era | Channel | Status |
+|---|---|---|---|
+| 2016 → today | Tizen, `token-auth=yes` | `wss://<tv>:8002` + token | **Supported.** Verified on a 2017 set |
+| 2015 | first Tizen year, no token auth | `ws://<tv>:8001` | *Should work* — the client falls back automatically, but untested |
+| ≤2014 | Orsay (pre-Tizen) | binary protocol on `:55000` | **Not supported.** A different protocol entirely |
+
+Samsung model codes carry a year letter — in `UN55` **`MU`** `8000` the `M` is
+2017 (`J`=2015, `K`=2016, `M`=2017, `N`=2018, `R`=2019, `T`=2020, `A`=2021,
+`B`=2022, `C`=2023). QLED and Frame codes do not follow this cleanly, so treat
+it as a hint and trust `tvctl discover` instead.
+
+### Verified vs. inferred
+
+Being straight about this, because it is one household's testing:
+
+- **Verified end to end** on a **QN55Q8FAAFXZC** (2017 QLED, Tizen 2.0.25):
+  pairing, all keys, hold-to-repeat, volume readback, app discovery and
+  launching, wake-on-LAN, and discovery.
+- **Inferred from the protocol, never run:** the 2015 `ws://` fallback, and
+  multiple TVs on one network (exercised with a synthetic second TV, not two
+  real sets).
+
+If you try this on another model, an issue saying what worked — and the
+`tvctl discover` line for your set — is genuinely useful.
+
+### Features degrade independently
+
+A partly-supported TV is still worth having:
 
 - **Keys** need the remote-control channel. Everything else is optional.
 - **The volume number** is read over UPnP `RenderingControl` on port 9197. If
   your set does not answer, keys still work and the number shows `—`.
-- **App tiles** need `POST /api/v2/applications/<id>`. App ids are per-model,
-  so they are probed, never assumed — see below.
-- **Wake-on-LAN** needs network standby enabled on the TV.
+- **App tiles** need `POST /api/v2/applications/<id>`. App ids differ between
+  models, so they are probed, never assumed.
+- **Wake-on-LAN** needs network standby switched on in the TV's own settings.
+  The panel tells you where to find it if a wake fails.
+
+## Requirements
+
+**Python 3 and nothing else.** No pip, no AUR, no `websocket-client`: `tvctl`
+implements the handful of RFC6455 frames the TV needs with the standard
+library, and imports only `base64 hashlib json os re socket ssl struct sys
+threading time urllib.request`.
+
+Omarchy already guarantees Python — `omarchy` depends on `uwsm`, which depends
+on `python` — so on a stock install there is nothing to install. If the helper
+somehow cannot run, the panel says so and gives the command, rather than
+sitting there blank.
 
 ## Finding the TV
 
@@ -64,13 +101,6 @@ TV to an ephemeral port, which conntrack does not treat as ESTABLISHED — so a
 default-deny firewall eats them silently and discovery "just doesn't work"
 with nothing in any log to explain it. The sweep is plain outbound TCP that
 any firewall already permits, and it takes about three seconds.
-
-## Requirements
-
-**Python 3, and nothing else.** No pip, no AUR, no `websocket-client`: the TV
-speaks plain RFC6455 over TLS with a self-signed cert, so `tvctl` implements
-the handful of frames it needs with the standard library. The TV just has to
-be reachable on the network.
 
 ## Install
 
