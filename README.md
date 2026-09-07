@@ -105,12 +105,18 @@ any firewall already permits, and it takes about three seconds.
 ## Install
 
 ```bash
-git clone https://github.com/rdoupe/omarchy-tvremote \
-  ~/.config/omarchy/plugins/io.github.rdoupe.tvremote
+omarchy plugin add https://github.com/rdoupe/omarchy-tvremote --enable
 omarchy bar put io.github.rdoupe.tvremote --after omarchy.audio
 ```
 
-Set the TV's address in the widget's settings (default `192.168.100.59`).
+That is the whole install. There is nothing to configure — no IP to enter, no
+MAC to look up. Opening the panel finds the TV, learns its MAC for
+wake-on-LAN, and pairs.
+
+`omarchy plugin add` clones into `~/.config/omarchy/plugins/`, so a plain
+`git clone` into that directory works too. Note that plugins run
+**unsandboxed inside the shell process**, with your full user permissions —
+read the source of anything you install, including this.
 
 ### First run
 
