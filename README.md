@@ -20,6 +20,10 @@ Streaming apps get one-click tiles — YouTube on a full-width primary tile,
 then Netflix, Prime Video and Spotify — and the panel can probe the TV for
 whatever else is installed.
 
+Unmuting the Omarchy microphone pauses TV playback so calls and dictation do
+not compete with it. The dedicated pause command does not resume media that
+was already paused. This behavior can be disabled in the widget settings.
+
 ## Which TVs does this support?
 
 **Short answer: Samsung Tizen smart TVs, 2016 and newer.** Those are the sets

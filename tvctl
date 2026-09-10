@@ -68,6 +68,7 @@ KEYS = {
     "volup": "KEY_VOLUP",
     "voldown": "KEY_VOLDOWN",
     "mute": "KEY_MUTE",
+    "pause": "KEY_PAUSE",
     "home": "KEY_HOME",
     "power": "KEY_POWER",
 }

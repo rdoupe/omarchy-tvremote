@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 
@@ -35,6 +36,16 @@ Panel {
   readonly property int pollInterval: Math.max(15, parseInt(setting("pollIntervalSec", 60)) || 60) * 1000
   readonly property bool hideWhenOff: String(setting("hideWhenOff", false)) === "true"
   readonly property bool resumeLastApp: String(setting("resumeLastApp", true)) !== "false"
+  readonly property bool pauseOnMicrophone: String(setting("pauseOnMicrophone", true)) !== "false"
+
+  // The microphone button changes the default source's mute state. Remember
+  // the first state we see so loading the shell with a live microphone is not
+  // mistaken for someone pressing the button.
+  readonly property var microphoneSource: Pipewire.defaultAudioSource
+  readonly property bool microphoneMuted: microphoneSource && microphoneSource.audio
+    ? microphoneSource.audio.muted : true
+  property var observedMicrophoneSource: null
+  property bool observedMicrophoneMuted: true
 
   // Device facts, refreshed by `tvctl state`.
   property bool reachable: false
@@ -137,6 +148,35 @@ Panel {
       daemon.running = true
     }
   }
+
+  function syncMicrophoneState() {
+    var source = microphoneSource
+    if (!source || !source.audio) {
+      observedMicrophoneSource = null
+      observedMicrophoneMuted = true
+      return
+    }
+
+    var currentMuted = !!source.audio.muted
+    if (observedMicrophoneSource !== source) {
+      observedMicrophoneSource = source
+      observedMicrophoneMuted = currentMuted
+      return
+    }
+
+    var microphoneActivated = observedMicrophoneMuted && !currentMuted
+    observedMicrophoneMuted = currentMuted
+    if (microphoneActivated && pauseOnMicrophone && reachable && power === "on") {
+      if (daemon.running) send("pause")
+      else if (!pauseProc.running) pauseProc.running = true
+    }
+  }
+
+  onMicrophoneSourceChanged: syncMicrophoneState()
+  onMicrophoneMutedChanged: syncMicrophoneState()
+  Component.onCompleted: syncMicrophoneState()
+
+  PwObjectTracker { objects: root.microphoneSource ? [root.microphoneSource] : [] }
 
   function press(key) {
     lastKey = key
@@ -392,6 +432,14 @@ Panel {
     command: [root.helper, "state"]
     environment: ({ "TV_HOST": root.host })
     stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
+  }
+
+  // A one-shot helper keeps microphone-triggered pauses independent of the
+  // panel daemon, which normally exists only while the remote is open.
+  Process {
+    id: pauseProc
+    command: [root.helper, "pause"]
+    environment: ({ "TV_HOST": root.host })
   }
 
   Timer {
