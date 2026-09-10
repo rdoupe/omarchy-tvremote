@@ -56,7 +56,7 @@
       {
         "key": "pauseOnMicrophone",
         "type": "boolean",
-        "label": "Pause the TV when the microphone is unmuted",
+        "label": "Pause the TV when an application starts using the microphone",
         "defaultValue": true
       }
     ]

@@ -38,14 +38,25 @@ Panel {
   readonly property bool resumeLastApp: String(setting("resumeLastApp", true)) !== "false"
   readonly property bool pauseOnMicrophone: String(setting("pauseOnMicrophone", true)) !== "false"
 
-  // The microphone button changes the default source's mute state. Remember
-  // the first state we see so loading the shell with a live microphone is not
-  // mistaken for someone pressing the button.
+  // Follow the same PipeWire capture-stream signal as Omarchy's microphone
+  // widget. This covers every application that actually opens the microphone;
+  // merely unmuting the default source is not microphone use.
   readonly property var microphoneSource: Pipewire.defaultAudioSource
   readonly property bool microphoneMuted: microphoneSource && microphoneSource.audio
     ? microphoneSource.audio.muted : true
-  property var observedMicrophoneSource: null
-  property bool observedMicrophoneMuted: true
+  readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
+  readonly property var microphoneStreams: {
+    var streams = []
+    for (var i = 0; i < pipewireNodes.length; i++) {
+      var node = pipewireNodes[i]
+      if (node && node.isStream && node.isSink === false && node.audio
+          && !node.audio.muted) streams.push(node)
+    }
+    return streams
+  }
+  readonly property bool microphoneInUse: microphoneStreams.length > 0 && !microphoneMuted
+  property bool microphoneUseKnown: false
+  property bool microphoneWasInUse: false
 
   // Device facts, refreshed by `tvctl state`.
   property bool reachable: false
@@ -149,23 +160,16 @@ Panel {
     }
   }
 
-  function syncMicrophoneState() {
-    var source = microphoneSource
-    if (!source || !source.audio) {
-      observedMicrophoneSource = null
-      observedMicrophoneMuted = true
+  function syncMicrophoneUse() {
+    var current = microphoneInUse
+    if (!microphoneUseKnown) {
+      microphoneUseKnown = true
+      microphoneWasInUse = current
       return
     }
 
-    var currentMuted = !!source.audio.muted
-    if (observedMicrophoneSource !== source) {
-      observedMicrophoneSource = source
-      observedMicrophoneMuted = currentMuted
-      return
-    }
-
-    var microphoneActivated = observedMicrophoneMuted && !currentMuted
-    observedMicrophoneMuted = currentMuted
+    var microphoneActivated = !microphoneWasInUse && current
+    microphoneWasInUse = current
     // Omarchy creates a widget instance for every monitor and a few layout
     // placeholders. Elect one live instance so a single mic press sends one
     // pause instead of one pause per instance.
@@ -179,9 +183,8 @@ Panel {
     }
   }
 
-  onMicrophoneSourceChanged: syncMicrophoneState()
-  onMicrophoneMutedChanged: syncMicrophoneState()
-  Component.onCompleted: syncMicrophoneState()
+  onMicrophoneInUseChanged: syncMicrophoneUse()
+  Component.onCompleted: syncMicrophoneUse()
 
   PwObjectTracker { objects: root.microphoneSource ? [root.microphoneSource] : [] }
 

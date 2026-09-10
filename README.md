@@ -20,9 +20,11 @@ Streaming apps get one-click tiles — YouTube on a full-width primary tile,
 then Netflix, Prime Video and Spotify — and the panel can probe the TV for
 whatever else is installed.
 
-Unmuting the Omarchy microphone pauses TV playback so calls and dictation do
-not compete with it. The dedicated pause command does not resume media that
-was already paused. This behavior can be disabled in the widget settings.
+When an application starts capturing from the microphone, the remote sends the
+TV's dedicated pause command so calls, dictation, and other microphone users do
+not compete with it. Merely unmuting the microphone does nothing, and the
+dedicated pause command does not resume media that was already paused. This
+behavior can be disabled in the widget settings.
 
 ## Which TVs does this support?
 
