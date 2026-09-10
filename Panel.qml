@@ -56,7 +56,7 @@ Panel {
   }
   readonly property bool microphoneInUse: microphoneStreams.length > 0 && !microphoneMuted
   property bool microphoneUseKnown: false
-  property bool microphoneWasInUse: false
+  property bool microphoneSessionLatched: false
 
   // Device facts, refreshed by `tvctl state`.
   property bool reachable: false
@@ -164,20 +164,28 @@ Panel {
     var current = microphoneInUse
     if (!microphoneUseKnown) {
       microphoneUseKnown = true
-      microphoneWasInUse = current
+      microphoneSessionLatched = current
       return
     }
 
-    var microphoneActivated = !microphoneWasInUse && current
-    microphoneWasInUse = current
+    if (!current) {
+      // PipeWire can briefly remove and recreate a capture node while an app
+      // tears its stream down. Do not let that churn become a second session
+      // (and therefore a second media key) on microphone release.
+      microphoneReleaseSettle.restart()
+      return
+    }
+
+    microphoneReleaseSettle.stop()
+    if (microphoneSessionLatched) return
+    microphoneSessionLatched = true
     // Omarchy creates a widget instance for every monitor and a few layout
     // placeholders. Elect one live instance so a single mic press sends one
     // pause instead of one pause per instance.
     var widgets = bar && typeof bar.moduleWidgets === "function"
       ? bar.moduleWidgets(moduleName) : []
     var ownsAutomation = widgets.length === 0 || widgets[0] === root
-    if (microphoneActivated && ownsAutomation && pauseOnMicrophone
-        && reachable && power === "on") {
+    if (ownsAutomation && pauseOnMicrophone && reachable && power === "on") {
       if (daemon.running) send("pause")
       else if (!pauseProc.running) pauseProc.running = true
     }
@@ -187,6 +195,15 @@ Panel {
   Component.onCompleted: syncMicrophoneUse()
 
   PwObjectTracker { objects: root.microphoneSource ? [root.microphoneSource] : [] }
+
+  Timer {
+    id: microphoneReleaseSettle
+    interval: 750
+    repeat: false
+    onTriggered: {
+      if (!root.microphoneInUse) root.microphoneSessionLatched = false
+    }
+  }
 
   function press(key) {
     lastKey = key
