@@ -22,8 +22,7 @@
       "host": "",
       "pollIntervalSec": 60,
       "hideWhenOff": false,
-      "resumeLastApp": true,
-      "pauseOnMicrophone": true
+      "resumeLastApp": true
     },
     "schema": [
       {
@@ -51,12 +50,6 @@
         "key": "resumeLastApp",
         "type": "boolean",
         "label": "After waking the TV, reopen the app that was last on screen",
-        "defaultValue": true
-      },
-      {
-        "key": "pauseOnMicrophone",
-        "type": "boolean",
-        "label": "Pause the TV when an application starts using the microphone",
         "defaultValue": true
       }
     ]

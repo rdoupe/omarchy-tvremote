@@ -20,12 +20,9 @@ Streaming apps get one-click tiles — YouTube on a full-width primary tile,
 then Netflix, Prime Video and Spotify — and the panel can probe the TV for
 whatever else is installed.
 
-When an application starts capturing from the microphone, the remote sends the
-TV's dedicated pause command so calls, dictation, and other microphone users do
-not compete with it. Merely unmuting the microphone does nothing, and the
-dedicated pause command does not resume media that was already paused. This
-behavior can be disabled in the widget settings. Stream teardown is debounced:
-releasing a push-to-talk key never sends a second TV command.
+Research into state-preserving microphone playback automation is documented in
+[docs/playback-automation.md](docs/playback-automation.md). It is intentionally
+not enabled until playback state can be determined reliably across TV apps.
 
 ## Which TVs does this support?
 

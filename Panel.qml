@@ -1,7 +1,6 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 
@@ -36,27 +35,6 @@ Panel {
   readonly property int pollInterval: Math.max(15, parseInt(setting("pollIntervalSec", 60)) || 60) * 1000
   readonly property bool hideWhenOff: String(setting("hideWhenOff", false)) === "true"
   readonly property bool resumeLastApp: String(setting("resumeLastApp", true)) !== "false"
-  readonly property bool pauseOnMicrophone: String(setting("pauseOnMicrophone", true)) !== "false"
-
-  // Follow the same PipeWire capture-stream signal as Omarchy's microphone
-  // widget. This covers every application that actually opens the microphone;
-  // merely unmuting the default source is not microphone use.
-  readonly property var microphoneSource: Pipewire.defaultAudioSource
-  readonly property bool microphoneMuted: microphoneSource && microphoneSource.audio
-    ? microphoneSource.audio.muted : true
-  readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
-  readonly property var microphoneStreams: {
-    var streams = []
-    for (var i = 0; i < pipewireNodes.length; i++) {
-      var node = pipewireNodes[i]
-      if (node && node.isStream && node.isSink === false && node.audio
-          && !node.audio.muted) streams.push(node)
-    }
-    return streams
-  }
-  readonly property bool microphoneInUse: microphoneStreams.length > 0 && !microphoneMuted
-  property bool microphoneUseKnown: false
-  property bool microphoneSessionLatched: false
 
   // Device facts, refreshed by `tvctl state`.
   property bool reachable: false
@@ -157,51 +135,6 @@ Panel {
       queue.push(command)
       pendingKeys = queue
       daemon.running = true
-    }
-  }
-
-  function syncMicrophoneUse() {
-    var current = microphoneInUse
-    if (!microphoneUseKnown) {
-      microphoneUseKnown = true
-      microphoneSessionLatched = current
-      return
-    }
-
-    if (!current) {
-      // PipeWire can briefly remove and recreate a capture node while an app
-      // tears its stream down. Do not let that churn become a second session
-      // (and therefore a second media key) on microphone release.
-      microphoneReleaseSettle.restart()
-      return
-    }
-
-    microphoneReleaseSettle.stop()
-    if (microphoneSessionLatched) return
-    microphoneSessionLatched = true
-    // Omarchy creates a widget instance for every monitor and a few layout
-    // placeholders. Elect one live instance so a single mic press sends one
-    // pause instead of one pause per instance.
-    var widgets = bar && typeof bar.moduleWidgets === "function"
-      ? bar.moduleWidgets(moduleName) : []
-    var ownsAutomation = widgets.length === 0 || widgets[0] === root
-    if (ownsAutomation && pauseOnMicrophone && reachable && power === "on") {
-      if (daemon.running) send("pause")
-      else if (!pauseProc.running) pauseProc.running = true
-    }
-  }
-
-  onMicrophoneInUseChanged: syncMicrophoneUse()
-  Component.onCompleted: syncMicrophoneUse()
-
-  PwObjectTracker { objects: root.microphoneSource ? [root.microphoneSource] : [] }
-
-  Timer {
-    id: microphoneReleaseSettle
-    interval: 750
-    repeat: false
-    onTriggered: {
-      if (!root.microphoneInUse) root.microphoneSessionLatched = false
     }
   }
 
@@ -459,14 +392,6 @@ Panel {
     command: [root.helper, "state"]
     environment: ({ "TV_HOST": root.host })
     stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
-  }
-
-  // A one-shot helper keeps microphone-triggered pauses independent of the
-  // panel daemon, which normally exists only while the remote is open.
-  Process {
-    id: pauseProc
-    command: [root.helper, "pause"]
-    environment: ({ "TV_HOST": root.host })
   }
 
   Timer {
