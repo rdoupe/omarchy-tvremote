@@ -166,7 +166,14 @@ Panel {
 
     var microphoneActivated = observedMicrophoneMuted && !currentMuted
     observedMicrophoneMuted = currentMuted
-    if (microphoneActivated && pauseOnMicrophone && reachable && power === "on") {
+    // Omarchy creates a widget instance for every monitor and a few layout
+    // placeholders. Elect one live instance so a single mic press sends one
+    // pause instead of one pause per instance.
+    var widgets = bar && typeof bar.moduleWidgets === "function"
+      ? bar.moduleWidgets(moduleName) : []
+    var ownsAutomation = widgets.length === 0 || widgets[0] === root
+    if (microphoneActivated && ownsAutomation && pauseOnMicrophone
+        && reachable && power === "on") {
       if (daemon.running) send("pause")
       else if (!pauseProc.running) pauseProc.running = true
     }
