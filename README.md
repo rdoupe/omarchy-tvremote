@@ -20,6 +20,10 @@ Streaming apps get one-click tiles — YouTube on a full-width primary tile,
 then Netflix, Prime Video and Spotify — and the panel can probe the TV for
 whatever else is installed.
 
+Research into state-preserving microphone playback automation is documented in
+[docs/playback-automation.md](docs/playback-automation.md). It is intentionally
+not enabled until playback state can be determined reliably across TV apps.
+
 ## Which TVs does this support?
 
 **Short answer: Samsung Tizen smart TVs, 2016 and newer.** Those are the sets
