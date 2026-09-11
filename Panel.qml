@@ -604,6 +604,8 @@ Panel {
                 : root.errorText !== "" ? root.errorText
                 : root.linkUp ? "connected" : "connecting…"
               color: root.errorText !== "" || !root.reachable ? Color.urgent : Color.muted
+              wrapMode: Text.WordWrap
+              maximumLineCount: 2
               elide: Text.ElideRight
               width: parent.width
               font.family: root.fontFamily
