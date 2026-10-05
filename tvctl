@@ -38,6 +38,7 @@ HOST = os.environ.get("TV_HOST", "").strip()
 WS_PORT = 8002
 API_PORT = 8001
 UPNP_PORT = 9197
+SDB_PORT = 26101           # Tizen developer mode; only open when it is on
 # Everything on the other end of these sockets is untrusted: the TV is a
 # closed-source appliance, and discovery talks to whatever answers on the LAN.
 # Nothing it says is allowed to make this process allocate without bound.
@@ -97,10 +98,12 @@ DEFAULT_APPS = [
      "color": "#1db954", "glyph": "\uf1bc", "show": True},
 ]
 
-# Probed by `tvctl scan`. This TV answers no enumeration request -- there is no
-# /api/v2/applications/ listing and ed.installedApp.get never replies -- so
-# discovering what is installed means asking about ids one at a time. Anything
-# not in this catalog can still be added to the config file by hand.
+# Probed by `tvctl scan`. The remote channel answers no enumeration request --
+# there is no /api/v2/applications/ listing and ed.installedApp.get and
+# ed.edenApp.get never reply -- so without developer mode, discovering what is
+# installed means asking about ids one at a time. With developer mode on, scan
+# also reads the TV's own app list (see sdb_app_ids) and this catalog only has
+# to cover the built-in apps that answer to a store number alone.
 CANDIDATE_APPS = {
     # Verified against this TV
     "111299001912": "YouTube",
@@ -907,14 +910,93 @@ def foreground_app(timeout=3):
 def short_name(name):
     """App store names run long ("Tubi - Free Movies & TV"); tiles do not."""
     name = re.split(r"\s*[-–:|]\s+", name, maxsplit=1)[0].strip()
-    return name if len(name) <= 18 else name[:17].rstrip() + "…"
+    if len(name) <= 18:
+        return name
+    # Whole words where possible: "MagellanTV Documentaries" reads better as
+    # "MagellanTV" than as "MagellanTV Docume…".
+    words = name.split()
+    kept = words[0]
+    for word in words[1:]:
+        if len(kept) + 1 + len(word) > 18:
+            break
+        kept += " " + word
+    return kept if len(kept) <= 18 else kept[:17].rstrip() + "…"
+
+
+# Launchable entries in the developer-mode app list that are plumbing, not
+# something anyone wants a tile for. The list is ~500 entries of which a few
+# dozen launch; these are the ones that launch and still are not apps.
+SDB_NOISE = re.compile(
+    r"service|webapp|extension|promotion|privacy|ad ?player|user guide"
+    r"|cast settings|smarttv|^rds$", re.I)
+
+
+def sdb_app_ids(timeout=5):
+    """Every app installed on the TV, as (name, appId), via developer mode.
+
+    The remote channel cannot list apps, but a TV in developer mode runs
+    sdbd -- Tizen's fork of adbd -- and `0 applist` there prints the whole
+    install, sideloaded apps included. The wire protocol is adb's: 24-byte
+    headers, CNXN to say hello, OPEN a shell service, then WRTE/OKAY until
+    CLSE. Returns [] when developer mode is off or anything goes wrong, so a
+    scan simply falls back to the catalog.
+    """
+    def packet(cmd, arg0, arg1, data=b""):
+        c = struct.unpack("<I", cmd)[0]
+        return struct.pack("<6I", c, arg0, arg1, len(data),
+                           sum(data) & 0xFFFFFFFF, c ^ 0xFFFFFFFF) + data
+
+    def read(sock, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("sdb closed")
+            buf += chunk
+        return buf
+
+    def message(sock):
+        cmd, arg0, _, n, _, _ = struct.unpack("<6I", read(sock, 24))
+        if n > MAX_FRAME:
+            raise ConnectionError("sdb payload too large")
+        return struct.pack("<I", cmd), arg0, read(sock, n) if n else b""
+
+    out = b""
+    try:
+        with socket.create_connection((HOST, SDB_PORT), timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(packet(b"CNXN", 0x02000000, 256 * 1024, b"host::\0"))
+            if message(sock)[0] != b"CNXN":
+                return []
+            sock.sendall(packet(b"OPEN", 1, 0, b"shell:0 applist\0"))
+            while len(out) < MAX_HTTP:
+                cmd, remote, data = message(sock)
+                if cmd == b"WRTE":
+                    out += data
+                    sock.sendall(packet(b"OKAY", 1, remote))
+                elif cmd == b"CLSE":
+                    break
+    except Exception:
+        if not out:
+            return []
+    # Rows look like:  'Disney+'	 'MCmYXNxgcu.DisneyPlus'
+    rows = re.findall(r"^\s*'([^']*)'\s+'([^']+)'", out.decode(errors="replace"), re.M)
+    # org.tizen.* and com.samsung.* are the firmware's own ~500 components;
+    # none of them launch over the REST API, so probing them is wasted time.
+    return [(n, i) for n, i in rows
+            if not i.startswith(("org.tizen.", "com.samsung."))
+            and not SDB_NOISE.search(n) and not SDB_NOISE.search(i.split(".", 1)[-1])]
 
 
 def scan_apps(timeout=3):
     """Probe every candidate id and return the ones this TV answers to.
 
-    The probes run in parallel because a missing app costs a full timeout and
-    a serial sweep of the catalog would take minutes.
+    Candidates are the catalog, the config, and -- if the TV is in developer
+    mode -- everything it says is installed. Only ids the REST API answers
+    for are kept: that is what launching needs, and it drops background
+    services from the developer-mode list for free. The probes run in
+    parallel because a missing app costs a full timeout and a serial sweep of
+    the catalog would take minutes.
     """
     known = {a["appId"]: a for a in load_apps()}
     results = {}
@@ -947,6 +1029,8 @@ def scan_apps(timeout=3):
     catalog = dict(CANDIDATE_APPS)
     for app in load_apps():           # never lose a hand-added id to a scan
         catalog.setdefault(app["appId"], app["name"])
+    for name, app_id in sdb_app_ids():
+        catalog.setdefault(app_id, name)
 
     threads = [threading.Thread(target=probe, args=(i, n), daemon=True)
                for i, n in catalog.items()]
@@ -958,7 +1042,15 @@ def scan_apps(timeout=3):
     # Configured order first, then anything new the scan turned up.
     ordered = [results[a["appId"]] for a in load_apps() if a["appId"] in results]
     seen = {a["appId"] for a in ordered}
-    ordered += [v for k, v in results.items() if k not in seen]
+    # One app often answers to two ids -- YouTube is both 111299001912 and
+    # 9Ur5IzDKqV.TizenYouTube -- so a new id whose name is already present is
+    # the same app again, not a second tile.
+    names = {a["name"].lower() for a in ordered}
+    for app_id, app in results.items():
+        if app_id in seen or app["name"].lower() in names:
+            continue
+        ordered.append(app)
+        names.add(app["name"].lower())
     return ordered
 
 

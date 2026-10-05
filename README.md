@@ -47,23 +47,24 @@ subnet, or too old to have the HTTP API.
 
 | Era | Model era | Channel | Status |
 |---|---|---|---|
-| 2016 → today | Tizen, `token-auth=yes` | `wss://<tv>:8002` + token | **Supported.** Verified on a 2017 set |
+| 2016 → today | Tizen, `token-auth=yes` | `wss://<tv>:8002` + token | **Supported.** Verified on a 2025 set; earlier years inferred from Samsung's API history |
 | 2015 | first Tizen year, no token auth | `ws://<tv>:8001` | *Should work* — the client falls back automatically, but untested |
 | ≤2014 | Orsay (pre-Tizen) | binary protocol on `:55000` | **Not supported.** A different protocol entirely |
 
 Samsung model codes carry a year letter — in `UN55` **`MU`** `8000` the `M` is
 2017 (`J`=2015, `K`=2016, `M`=2017, `N`=2018, `R`=2019, `T`=2020, `A`=2021,
-`B`=2022, `C`=2023). QLED and Frame codes do not follow this cleanly, so treat
-it as a hint and trust `tvctl discover` instead.
+`B`=2022, `C`=2023, `D`=2024, `F`=2025). Newer QLED codes put it after the
+series instead — in `QN55Q8` **`F`** `AAFXZC` the `F` is 2025 — so treat it as a hint and trust `tvctl discover` instead.
 
 ### Verified vs. inferred
 
 Being straight about this, because it is one household's testing:
 
-- **Verified end to end** on a **QN55Q8FAAFXZC** (2017 QLED, Tizen 2.0.25):
+- **Verified end to end** on a **QN55Q8FAAFXZC** (2025 QLED, Tizen 9.0):
   pairing, all keys, hold-to-repeat, volume readback, app discovery and
   launching, wake-on-LAN, and discovery.
-- **Inferred from the protocol, never run:** the 2015 `ws://` fallback, and
+- **Inferred from the protocol, never run:** the 2016–2024 sets (same token
+  channel, per Samsung's API history, but untested), the 2015 `ws://` fallback, and
   multiple TVs on one network (exercised with a synthetic second TV, not two
   real sets).
 
@@ -255,8 +256,24 @@ internet gives for Netflix, `11101200001`, is a **404** on this set, while
 there is no `/api/v2/applications/` listing and `ed.installedApp.get` never
 replies. So `tvctl scan` probes a catalog of known ids one at a time (in
 parallel — a full sweep takes under a second) and keeps whichever the TV
-acknowledges. Anything the catalog misses can still be added to the JSON by
-hand.
+acknowledges.
+
+### Finding everything: turn on developer mode
+
+A catalog can only find apps it already knows about. **With the TV in
+developer mode, the scan finds every installed app** — sideloaded ones like
+Moonlight included — because it reads the TV's own app list over `sdb`
+(Tizen's `adb`, port 26101), then keeps the entries the launch API answers for.
+That filter drops the hundreds of firmware components and background services
+on the list. The client is built into `tvctl`; nothing extra to install.
+
+To turn developer mode on: open **Apps** on the TV, enter `1 2 3 4 5` on the
+remote's number pad, switch **Developer mode** on, enter this computer's IP
+address as the host, and restart the TV. If you installed an app with
+Apps2Samsung or the Tizen tools, it is probably on already.
+
+Without developer mode the scan falls back to the catalog, and anything it
+misses can still be added to the JSON by hand. Your agent can do this for you.
 
 The TV also serves **no artwork** for its apps — `/api/v2/applications/<id>/icon`,
 `/icon.png`, `/image`, `/thumbnail` and the DIAL equivalent are all 404s. The
