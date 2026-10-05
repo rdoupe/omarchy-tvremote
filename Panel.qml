@@ -1024,36 +1024,51 @@ Panel {
           // One app per line: the row opens the app, the pin beside it moves
           // the app up into the numbered tiles. Pinning used to be a
           // right-click nobody would find.
-          Column {
-            id: moreList
+          // Bounded at six rows and scrollable past that: a TV with a long
+          // list of apps would otherwise push the panel past the bottom of a
+          // short screen, out of reach of the mouse.
+          Flickable {
+            id: moreScroll
             width: parent.width
-            spacing: Style.space(4)
             visible: root.moreOpen && root.otherApps.length > 0
+            height: Math.min(moreList.implicitHeight,
+                             Style.space(28) * 6 + Style.space(4) * 5)
+            contentWidth: width
+            contentHeight: moreList.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
 
-            Repeater {
-              model: root.otherApps.length
-              Row {
-                width: moreList.width
-                spacing: Style.space(4)
+            Column {
+              id: moreList
+              width: moreScroll.width
+              spacing: Style.space(4)
 
-                AppTile {
-                  app: root.otherApps[index]
-                  width: parent.width - pinButton.width - parent.spacing
-                  height: Style.space(28)
-                  listed: true
-                  muted: true
-                }
+              Repeater {
+                model: root.otherApps.length
+                Row {
+                  width: moreList.width
+                  spacing: Style.space(4)
 
-                Button {
-                  id: pinButton
-                  width: Style.space(28)
-                  height: Style.space(28)
-                  iconText: "󰤱"           // md-pin-outline
-                  iconSize: Style.font.body
-                  foreground: Color.muted
-                  bordered: true
-                  tooltipText: "Pin " + String(root.otherApps[index].name) + " to the tiles"
-                  onClicked: root.togglePin(String(root.otherApps[index].key))
+                  AppTile {
+                    app: root.otherApps[index]
+                    width: parent.width - pinButton.width - parent.spacing
+                    height: Style.space(28)
+                    listed: true
+                    muted: true
+                  }
+
+                  Button {
+                    id: pinButton
+                    width: Style.space(28)
+                    height: Style.space(28)
+                    iconText: "󰤱"           // md-pin-outline
+                    iconSize: Style.font.body
+                    foreground: Color.muted
+                    bordered: true
+                    tooltipText: "Pin " + String(root.otherApps[index].name) + " to the tiles"
+                    onClicked: root.togglePin(String(root.otherApps[index].key))
+                  }
                 }
               }
             }

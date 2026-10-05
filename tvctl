@@ -952,10 +952,23 @@ def short_name(name):
 
 # Launchable entries in the developer-mode app list that are plumbing, not
 # something anyone wants a tile for. The list is ~500 entries of which a few
-# dozen launch; these are the ones that launch and still are not apps.
-SDB_NOISE = re.compile(
-    r"service|webapp|extension|promotion|privacy|ad ?player|user guide"
-    r"|cast settings|smarttv|^rds$", re.I)
+# dozen launch; these are the ones that launch and still are not apps. Matched
+# on the part of the app id after the package, exactly: a word match would
+# also drop a real sideloaded app that happened to be called "Privacy
+# Browser". Background services need no entry -- the REST probe already
+# turns them away -- except for the odd one that answers it anyway, which the
+# id suffix below catches ("TestBGService", "ContinueWatchingService").
+SDB_NOISE_IDS = {
+    "ADPlayer", "PromotionApp", "PrivacyChoices", "emanual",
+    "CastSettingsApp", "RDSGO", "cmsWebApp", "WebAccountExtension",
+    "SmartTV",
+}
+SDB_SERVICE_ID = re.compile(r"(?:BG)?Service$")
+
+
+def sdb_noise(app_id):
+    suffix = app_id.split(".", 1)[-1]
+    return suffix in SDB_NOISE_IDS or bool(SDB_SERVICE_ID.search(suffix))
 
 
 def sdb_app_ids(timeout=5):
@@ -1012,7 +1025,7 @@ def sdb_app_ids(timeout=5):
     # none of them launch over the REST API, so probing them is wasted time.
     return [(n, i) for n, i in rows
             if not i.startswith(("org.tizen.", "com.samsung."))
-            and not SDB_NOISE.search(n) and not SDB_NOISE.search(i.split(".", 1)[-1])]
+            and not sdb_noise(i)]
 
 
 def scan_apps(timeout=3):
@@ -1041,8 +1054,8 @@ def scan_apps(timeout=3):
             name = known[app_id]["name"]
         with lock:
             results[app_id] = {
-                "key": known[app_id]["key"] if app_id in known
-                       else re.sub(r"[^a-z0-9]+", "", name.lower()) or app_id,
+                # New apps get a key once every probe is in; see below.
+                "key": known[app_id]["key"] if app_id in known else "",
                 "name": name,
                 "appId": app_id,
                 # A saved colour or mark wins, but not a blank one: apps
@@ -1079,9 +1092,21 @@ def scan_apps(timeout=3):
     # 9Ur5IzDKqV.TizenYouTube -- so a new id whose name is already present is
     # the same app again, not a second tile.
     names = {a["name"].lower() for a in ordered}
+    # Keys are how the panel and `tvctl app` address an app, so two apps must
+    # never share one -- "Disney+" and "Disney" both normalise to "disney".
+    # Configured keys are reserved as they stand; a new app that collides
+    # takes the next free numbered variant.
+    used = {a["key"] for a in load_apps()}
     for app_id, app in results.items():
         if app_id in seen or app["name"].lower() in names:
             continue
+        if not app["key"]:
+            base = re.sub(r"[^a-z0-9]+", "", app["name"].lower()) or app_id
+            key, n = base, 2
+            while key in used:
+                key, n = f"{base}{n}", n + 1
+            app["key"] = key
+        used.add(app["key"])
         ordered.append(app)
         names.add(app["name"].lower())
     return ordered
