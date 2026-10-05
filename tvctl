@@ -196,7 +196,7 @@ GENERIC_GLYPHS = {
     "Internet": "\U000f059f",           # web
     "Samsung TV Plus": "\U000f0ecf",    # television-play
     "Tubi": "\U000f040b",               # play-box-outline
-    "Disney+": "\U000f0fce",            # movie-open
+    "Disney+": "\U000f011a",            # castle
     "CuriosityStream": "\U000f0b4e",    # telescope
     "MagellanTV": "\U000f018b",         # compass
     "Perplexity": "\U000f0674",         # creation (AI sparkle)
