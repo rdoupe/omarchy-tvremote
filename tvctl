@@ -184,11 +184,28 @@ GLYPHS = {
     "Spotify": "\uf1bc",
     "Apple TV": "\uf179", "Apple Music": "\uf179",
     "Twitch": "\uf1e8",
+    "Xbox": "\U000f05b9", "Plex": "\U000f06ba",
+    "Amazon Alexa": "\uf270",
+}
+
+# Stand-ins for apps the font has no mark for: a symbol for what the app is,
+# drawn in the brand colour, so the "more" list is not a column of bare text.
+# Kept apart from GLYPHS because these are not the brands' own marks.
+GENERIC_GLYPHS = {
+    "Moonlight": "\U000f0594",          # weather-night
+    "Internet": "\U000f059f",           # web
+    "Samsung TV Plus": "\U000f0ecf",    # television-play
+    "Tubi": "\U000f040b",               # play-box-outline
+    "Disney+": "\U000f0fce",            # movie-open
+    "CuriosityStream": "\U000f0b4e",    # telescope
+    "MagellanTV": "\U000f018b",         # compass
+    "Perplexity": "\U000f0674",         # creation (AI sparkle)
+    "Steam Link": "\uf1b6",
 }
 
 
 def default_glyph(name):
-    return GLYPHS.get(name, "")
+    return GLYPHS.get(name) or GENERIC_GLYPHS.get(name, "")
 
 
 def default_color(name):
@@ -203,8 +220,15 @@ def default_color(name):
         "Hulu": "#1ce783", "Max": "#7b5cf0", "HBO Max": "#7b5cf0",
         "Paramount+": "#0064ff", "Peacock": "#f5c518", "Discovery+": "#2175d9",
         "Crunchyroll": "#f47521", "BritBox": "#0b6cff", "CTV": "#00a0df",
+        "Moonlight": "#8c9eff", "Internet": "#4c8bf5",
+        "Samsung TV Plus": "#2e8bff", "Amazon Alexa": "#00caff",
+        "CuriosityStream": "#f5b301", "MagellanTV": "#d9a441",
+        "Perplexity": "#20b8cd",
     }
-    return palette.get(name, "#8a8f98")
+    return palette.get(name, FALLBACK_COLOR)
+
+
+FALLBACK_COLOR = "#8a8f98"
 
 
 def load_apps():
@@ -229,8 +253,11 @@ def load_apps():
                 "key": key,
                 "name": name,
                 "appId": str(a["appId"]),
-                "color": str(a.get("color") or default_color(name)),
-                "glyph": str(a.get("glyph", default_glyph(name))),
+                # Blank marks and the grey fallback mean "nothing known when
+                # this was saved", not a choice, so the tables fill them in.
+                "color": str(a.get("color") if a.get("color") not in
+                             (None, "", FALLBACK_COLOR) else default_color(name)),
+                "glyph": str(a.get("glyph") or default_glyph(name)),
                 "show": a.get("show", True) is not False,
             })
         if cleaned:
@@ -1018,9 +1045,15 @@ def scan_apps(timeout=3):
                        else re.sub(r"[^a-z0-9]+", "", name.lower()) or app_id,
                 "name": name,
                 "appId": app_id,
-                "color": known[app_id]["color"] if app_id in known
+                # A saved colour or mark wins, but not a blank one: apps
+                # first scanned before their brand was in the tables would
+                # otherwise stay grey and markless for good.
+                "color": known[app_id]["color"]
+                         if app_id in known
+                         and known[app_id]["color"] != FALLBACK_COLOR
                          else default_color(name),
-                "glyph": known[app_id]["glyph"] if app_id in known
+                "glyph": known[app_id]["glyph"]
+                         if app_id in known and known[app_id]["glyph"]
                          else default_glyph(name),
                 # A newly discovered app stays behind "more" until pinned.
                 "show": known[app_id]["show"] if app_id in known else False,

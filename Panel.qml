@@ -899,55 +899,6 @@ Panel {
               }
             }
           }
-
-          // Everything else the last scan found on the TV, folded away so the
-          // apps actually used keep the top of the panel. Rescan sits here
-          // rather than at the foot of the panel, next to the list it
-          // refreshes.
-          Item {
-            width: parent.width
-            height: Style.space(20)
-
-            Button {
-              anchors.centerIn: parent
-              visible: root.otherApps.length > 0
-              text: (root.moreOpen ? "󰅃  " : "󰅀  ") + root.otherApps.length + " more on the TV"
-              fontSize: Style.font.caption
-              foreground: Color.muted
-              tooltipText: "Apps found on the TV. Right-click one to pin it."
-              onClicked: root.moreOpen = !root.moreOpen
-            }
-
-            Button {
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.scanning ? "scanning…" : ""
-              iconText: root.scanning ? "" : "󰑐"
-              iconSize: Style.font.body
-              fontSize: Style.font.caption
-              foreground: Color.muted
-              verticalPadding: Style.space(2)
-              tooltipText: "Rescan the TV for installed apps"
-              onClicked: if (!root.scanning) root.rescanApps()
-            }
-          }
-
-          Flow {
-            id: moreFlow
-            width: parent.width
-            spacing: Style.space(4)
-            visible: root.moreOpen && root.otherApps.length > 0
-
-            Repeater {
-              model: root.otherApps.length
-              AppTile {
-                app: root.otherApps[index]
-                width: (moreFlow.width - moreFlow.spacing * 2) / 3
-                height: Style.space(22)
-                muted: true
-              }
-            }
-          }
         }
 
         // ---------- D-pad ----------
@@ -1033,6 +984,64 @@ Panel {
           RemoteKey { key: "volup"; glyph: "󰐕"; tip: "Volume up  (=)"; shortcutHint: "=" }
         }
 
+        // ---------- more on the TV ----------
+        // Everything else the last scan found on the TV, folded away below
+        // the remote so the pinned tiles and the D-pad keep the top of the
+        // panel. Rescan sits here, next to the list it refreshes. Two to a
+        // row with names: these tiles are mostly stand-in marks, and a mark
+        // alone does not say which app it is.
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+          visible: root.apps.length > 0 && !root.blocked
+
+          Item {
+            width: parent.width
+            height: Style.space(24)
+
+            Button {
+              anchors.centerIn: parent
+              visible: root.otherApps.length > 0
+              text: (root.moreOpen ? "󰅃  " : "󰅀  ") + root.otherApps.length + " more on the TV"
+              fontSize: Style.font.body
+              foreground: Color.muted
+              tooltipText: "Apps found on the TV. Right-click one to pin it."
+              onClicked: root.moreOpen = !root.moreOpen
+            }
+
+            Button {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.scanning ? "scanning…" : ""
+              iconText: root.scanning ? "" : "󰑐"
+              iconSize: Style.font.body
+              fontSize: Style.font.body
+              foreground: Color.muted
+              verticalPadding: Style.space(2)
+              tooltipText: "Rescan the TV for installed apps"
+              onClicked: if (!root.scanning) root.rescanApps()
+            }
+          }
+
+          Flow {
+            id: moreFlow
+            width: parent.width
+            spacing: Style.space(4)
+            visible: root.moreOpen && root.otherApps.length > 0
+
+            Repeater {
+              model: root.otherApps.length
+              AppTile {
+                app: root.otherApps[index]
+                width: (moreFlow.width - moreFlow.spacing) / 2
+                height: Style.space(28)
+                listed: true
+                muted: true
+              }
+            }
+          }
+        }
+
         // ---------- how to get back here ----------
         // The whole point of the widget is that the popup takes the keyboard,
         // so the one shortcut that is not printed on a button is the one that
@@ -1071,13 +1080,15 @@ Panel {
     property bool primary: false
     property bool muted: false
     property int number: 0
+    // A row in the "more" list: mark and name side by side at body size.
+    property bool listed: false
 
     readonly property string glyph: app ? String(app.glyph || "") : ""
     readonly property string appName: app ? String(app.name) : ""
     readonly property color brand: app ? String(app.color) : root.fg
     // A third-width tile cannot hold a mark and a name without spilling, and
     // the mark alone is the more recognisable half.
-    readonly property bool showName: primary || glyph === ""
+    readonly property bool showName: primary || listed || glyph === ""
 
     text: ""
     iconText: ""
@@ -1143,7 +1154,13 @@ Panel {
         text: appTile.appName
         color: appTile.glyph !== "" ? root.fg : appTile.brand
         font.family: root.fontFamily
-        font.pixelSize: appTile.primary ? Style.font.subtitle : Style.font.caption
+        font.pixelSize: appTile.primary ? Style.font.subtitle
+                      : appTile.listed ? Style.font.body : Style.font.caption
+        // Long store names ("Samsung TV Plus") must not spill out of a
+        // half-width tile.
+        width: Math.min(implicitWidth, appTile.width - Style.space(16)
+                        - (appTile.glyph !== "" ? Style.font.iconLarge + Style.spacing.controlGap : 0))
+        elide: Text.ElideRight
         font.bold: appTile.primary
         anchors.verticalCenter: parent.verticalCenter
       }
