@@ -248,6 +248,25 @@ click. `show: false` keeps an app out of the tiles and behind the panel's
 apps and merges what it finds into the file, leaving your names, colours and
 order alone.
 
+### Icons and colours
+
+The TV hands out no app artwork, so a tile's mark is a `glyph`: one character
+from the bar's Nerd Font, drawn in the app's `color`. Big brands (YouTube,
+Netflix, Spotify, Xbox…) get their real mark, a few others get a fitting
+stand-in, and anything unknown is its name in grey. Nobody can list every app
+in advance, so the intended fix is to ask your agent: *"give Tubi a better
+icon"*. The agent then:
+
+1. picks a glyph — search the font's glyph names (e.g. `md-castle`,
+   `md-microsoft_xbox`) at [nerdfonts.com/cheat-sheet](https://www.nerdfonts.com/cheat-sheet);
+2. sets `"glyph"` (the character itself, or a `\uXXXX` / surrogate-pair escape)
+   and `"color"` (`#rrggbb`) on that app in `~/.config/omarchy/tvremote-apps.json`;
+3. that is all: the panel rereads the file each time it opens.
+
+A blank `glyph` or the grey fallback colour (`#8a8f98`) counts as unset, and
+the built-in tables fill it in; any other value you set is kept across
+rescans.
+
 ### Why app ids are probed rather than listed
 
 Tizen application ids are per-model and per-firmware — the id every list on the
