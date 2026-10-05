@@ -987,9 +987,7 @@ Panel {
         // ---------- more on the TV ----------
         // Everything else the last scan found on the TV, folded away below
         // the remote so the pinned tiles and the D-pad keep the top of the
-        // panel. Rescan sits here, next to the list it refreshes. Two to a
-        // row with names: these tiles are mostly stand-in marks, and a mark
-        // alone does not say which app it is.
+        // panel. Rescan sits here, next to the list it refreshes.
         Column {
           width: parent.width
           spacing: Style.space(4)
@@ -1005,7 +1003,7 @@ Panel {
               text: (root.moreOpen ? "󰅃  " : "󰅀  ") + root.otherApps.length + " more on the TV"
               fontSize: Style.font.body
               foreground: Color.muted
-              tooltipText: "Apps found on the TV. Right-click one to pin it."
+              tooltipText: "Apps found on the TV. Pin one to give it a numbered tile."
               onClicked: root.moreOpen = !root.moreOpen
             }
 
@@ -1023,20 +1021,40 @@ Panel {
             }
           }
 
-          Flow {
-            id: moreFlow
+          // One app per line: the row opens the app, the pin beside it moves
+          // the app up into the numbered tiles. Pinning used to be a
+          // right-click nobody would find.
+          Column {
+            id: moreList
             width: parent.width
             spacing: Style.space(4)
             visible: root.moreOpen && root.otherApps.length > 0
 
             Repeater {
               model: root.otherApps.length
-              AppTile {
-                app: root.otherApps[index]
-                width: (moreFlow.width - moreFlow.spacing) / 2
-                height: Style.space(28)
-                listed: true
-                muted: true
+              Row {
+                width: moreList.width
+                spacing: Style.space(4)
+
+                AppTile {
+                  app: root.otherApps[index]
+                  width: parent.width - pinButton.width - parent.spacing
+                  height: Style.space(28)
+                  listed: true
+                  muted: true
+                }
+
+                Button {
+                  id: pinButton
+                  width: Style.space(28)
+                  height: Style.space(28)
+                  iconText: "󰤱"           // md-pin-outline
+                  iconSize: Style.font.body
+                  foreground: Color.muted
+                  bordered: true
+                  tooltipText: "Pin " + String(root.otherApps[index].name) + " to the tiles"
+                  onClicked: root.togglePin(String(root.otherApps[index].key))
+                }
               }
             }
           }
@@ -1080,7 +1098,7 @@ Panel {
     property bool primary: false
     property bool muted: false
     property int number: 0
-    // A row in the "more" list: mark and name side by side at body size.
+    // A row in the "more" list: mark and name at body size, left-aligned.
     property bool listed: false
 
     readonly property string glyph: app ? String(app.glyph || "") : ""
@@ -1135,7 +1153,8 @@ Panel {
     }
 
     Row {
-      anchors.centerIn: parent
+      anchors.verticalCenter: parent.verticalCenter
+      x: appTile.listed ? Style.space(10) : (parent.width - width) / 2
       spacing: Style.spacing.controlGap
 
       Text {
