@@ -1088,9 +1088,15 @@ def choose_host(ip):
     global HOST
     info = identify(ip, timeout=3)
     HOST = ip
-    save_host(ip)
-    if info and info["mac"]:
-        save_mac(info["mac"])
+    # Remembering is a convenience. A state file that cannot be written --
+    # a symlink planted there is refused, by design -- must not stop the
+    # remote from working with the TV that was just chosen.
+    try:
+        save_host(ip)
+        if info and info["mac"]:
+            save_mac(info["mac"])
+    except OSError:
+        pass
     return info
 
 
