@@ -87,8 +87,8 @@ A partly-supported TV is still worth having:
 
 **Python 3 and nothing else.** No pip, no AUR, no `websocket-client`: `tvctl`
 implements the handful of RFC6455 frames the TV needs with the standard
-library, and imports only `base64 hashlib json os re socket ssl struct sys
-threading time urllib.request`.
+library, and imports only `base64 contextlib hashlib json os re secrets
+socket ssl stat struct sys threading time`.
 
 Omarchy already guarantees Python — `omarchy` depends on `uwsm`, which depends
 on `python` — so on a stock install there is nothing to install. If the helper
@@ -100,7 +100,7 @@ sitting there blank.
 `tvctl discover` sweeps the local /24 asking each address for `/api/v2/`. One
 Samsung TV is chosen automatically and remembered; several, and the panel asks
 which one on first launch. The address is cached in
-`~/.local/state/omarchy/tvremote-host`, and re-discovered if the TV moves.
+`~/.local/state/omarchy/tvremote/host`, and re-discovered if the TV moves.
 
 This is deliberately a TCP sweep rather than SSDP. SSDP is the documented way
 and it is one packet instead of 254, but its replies are unicast UDP from the
@@ -129,7 +129,7 @@ read the source of anything you install, including this.
 
 ```bash
 omarchy plugin remove io.github.rdoupe.tvremote
-rm -f ~/.local/state/omarchy/tvremote-{token,host,mac,lastapp}
+rm -rf ~/.local/state/omarchy/tvremote
 rm -f ~/.config/omarchy/tvremote-apps.json
 ```
 
@@ -153,8 +153,9 @@ Opening the panel is all it takes. Measured on a wiped install:
 ```
 
 The TV shows an **Allow / Deny** prompt the first time a given client name
-connects. Accept it with the physical remote; the token is saved to
-`~/.local/state/omarchy/tvremote-token` and pairing never happens again.
+connects -- the panel switches to a large **"Look at your TV and approve"**
+the moment that prompt is up. Accept it with the physical remote; the token is saved to
+`~/.local/state/omarchy/tvremote/token` and pairing never happens again.
 
 Two things about that prompt are worth knowing, both learned the hard way:
 
@@ -329,7 +330,7 @@ reach it over the remote socket. `tvctl wake` sends a **wake-on-LAN magic
 packet** to the NIC instead, which keeps listening while the set sleeps.
 
 The MAC is learned automatically from `/api/v2/` whenever the TV is reachable
-and cached in `~/.local/state/omarchy/tvremote-mac`, so it is on hand later
+and cached in `~/.local/state/omarchy/tvremote/mac`, so it is on hand later
 when the TV is off and cannot be asked. Override with `TV_MAC=…`.
 
 In the panel, the power button turns the TV off when it is on and wakes it
@@ -366,8 +367,13 @@ like scanning to an IDS, so it is worth knowing it happens.
 **Wake-on-LAN broadcasts** at most a dozen small UDP packets to
 `255.255.255.255` and your subnet broadcast, and only when you ask.
 
-**What it touches on disk:** `~/.local/state/omarchy/tvremote-{token,host,mac,lastapp}`
-and `~/.config/omarchy/tvremote-apps.json`. Nothing outside those. The pairing
+**What it touches on disk:** `~/.local/state/omarchy/tvremote/` (its own
+directory, kept 0700, holding `token`, `host`, `mac`, `lastapp` at 0600)
+and `~/.config/omarchy/tvremote-apps.json`. Nothing outside those; files an
+older version left as `~/.local/state/omarchy/tvremote-*` are moved in once.
+Neither path follows a symlink below your home directory, so the app config
+must be a regular file -- a dotfile-manager link there is ignored and the
+default tiles are used. The pairing
 token is created `0600` and never appears in output, arguments, or logs.
 
 **No shell, ever.** `tvctl` uses no `subprocess`, `os.system`, or shell string
