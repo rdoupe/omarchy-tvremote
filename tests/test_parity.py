@@ -103,7 +103,8 @@ class LaunchContractTests(unittest.TestCase):
 
     def test_bounds_script(self):
         node = shutil.which("node")
-        self.assertIsNotNone(node)
+        if node is None:
+            self.skipTest("node is not installed")
         result = subprocess.run(
             [node, str(ROOT / "tests" / "js" / "bounds-test.js")],
             check=False, capture_output=True, text=True)
