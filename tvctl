@@ -1402,9 +1402,11 @@ def scan_apps(timeout=3):
     with lock:
         done = dict(results)       # stragglers may still be writing
         heard = set(answered)
-    if not done:
+    if not heard:
         # Not one id answered: the TV is off or not listening, which says
-        # nothing about what is installed. Leave the config alone.
+        # nothing about what is installed. Leave the config alone. A non-200
+        # (the app is not installed) still counts as an answer: `done` holds
+        # only the 200s, so an all-404 scan must update the config, not raise.
         raise ConnectionError("the TV did not answer")
 
     # Configured order first, then anything new the scan turned up.
