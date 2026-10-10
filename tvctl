@@ -517,6 +517,10 @@ def channel_endpoints():
     return [(WS_PORT, True), (API_PORT, False)]
 
 
+class PromptTimeout(TimeoutError):
+    """Nobody answered the TV's Allow/Deny prompt in time."""
+
+
 def connect(timeout=8, _after_pairing=False, on_prompt=None):
     """Open the remote-control channel. Returns (socket, newly_paired).
 
@@ -590,6 +594,12 @@ def connect(timeout=8, _after_pairing=False, on_prompt=None):
                     ws.close()
                     return connect(timeout, _after_pairing=True)[0], True
                 return ws, False
+            # The TV withdraws its Allow prompt after ~30s unanswered and
+            # says so -- then leaves the socket open another ~20s. Waiting
+            # for that close kept the panel saying "waiting" over a prompt
+            # that was already gone.
+            if event == "ms.channel.timeOut":
+                raise PromptTimeout("the prompt on the TV timed out")
             if event in ("ms.channel.unauthorized", "ms.error"):
                 raise PermissionError("TV denied the connection: " + json.dumps(msg))
     except Exception:
@@ -1613,6 +1623,10 @@ def _warm(server):
     """
     try:
         server.ensure()
+    except PromptTimeout:
+        emit({"type": "error",
+              "msg": "The prompt on the TV timed out. Press ask again, "
+                     "then Allow on the TV."})
     except Exception as exc:
         if not load_token():
             emit({"type": "error",

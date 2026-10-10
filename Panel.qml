@@ -142,6 +142,18 @@ Panel {
     }
   }
 
+  // A key from the bar icon itself, with the popup possibly closed. Unpaired,
+  // that key would open the remote channel and put the TV's Allow prompt up
+  // with nothing on this screen saying why -- so it opens the panel instead,
+  // which asks for pairing where the user can see it.
+  function barKey(key) {
+    if (!paired) {
+      if (!opened) toggle()
+      return
+    }
+    press(key)
+  }
+
   function press(key) {
     lastKey = key
     flash.restart()
@@ -519,12 +531,12 @@ Panel {
     opacity: root.reachable ? 1 : 0.45
     tooltipText: root.tooltip()
     onPressed: function(b) {
-      if (b === Qt.RightButton) root.press("mute")
+      if (b === Qt.RightButton) root.barKey("mute")
       else root.toggle()
     }
     // Volume without opening anything: the most common thing wanted from a
     // TV remote is one notch up or down.
-    onWheelMoved: function(delta) { root.press(delta > 0 ? "volup" : "voldown") }
+    onWheelMoved: function(delta) { root.barKey(delta > 0 ? "volup" : "voldown") }
   }
 
   // ----------------------------------------------------------------- popup
