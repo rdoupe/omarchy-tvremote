@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "bounds.js" as Bounds
 
 // A Samsung TV's remote in the bar. Keys go over the Tizen remote-control
 // WebSocket (see tvctl); the panel never touches the network itself.
@@ -27,7 +28,14 @@ Panel {
   moduleName: "io.github.rdoupe.tvremote"
   ipcTarget: "io.github.rdoupe.tvremote"
 
-  readonly property string helper: String(Qt.resolvedUrl("tvctl")).replace(/^file:\/\//, "")
+  // Distro identities. Never ambient PATH. hyprctl is the /usr/bin entry of
+  // the closed /usr/bin:/bin list (Arch usr-merge, so /bin/hyprctl is the
+  // same file). tvctl is this plugin file, launched by absolute path.
+  readonly property string python3Bin: "/usr/bin/python3"
+  readonly property string hyprctlBin: "/usr/bin/hyprctl"
+  readonly property string trustedPath: "/usr/bin:/bin"
+  readonly property string helper: decodeURIComponent(
+    String(Qt.resolvedUrl("tvctl")).replace(/^file:\/\//, ""))
   // Empty means "find it". A published plugin cannot ship anyone's address,
   // and a hardcoded one would silently defeat discovery on every install but
   // the author's -- which is exactly what this line used to do.
@@ -59,6 +67,12 @@ Panel {
   // rather than advertising a key that would do nothing.
   property string hotkey: ""
   property bool hotkeyChecked: false
+  property bool hotkeyDiscarded: false
+  // Partial lines held by the bounded SplitParser readers. Cleared when a
+  // chunk crosses Bounds.DAEMON_LINE_MAX so the tail is discarded, not parsed.
+  property string daemonBuf: ""
+  property string daemonErrBuf: ""
+  property string stateBuf: ""
 
   // A tokenless connect is in flight: the Allow/Deny prompt is on the TV
   // screen this second, and nothing comes back until someone answers it
@@ -126,6 +140,70 @@ Panel {
     : "󰕾"
 
   // ---------------------------------------------------------------- backend
+
+  // Allowlist only. clearEnvironment drops PYTHON*, LD_* and ambient PATH
+  // before /usr/bin/python3 or /usr/bin/hyprctl starts. PATH is fixed.
+  // TV_HOST and TV_RESUME_APP come from the plugin settings, not the session.
+  function launchEnvironment() {
+    var env = {
+      PATH: root.trustedPath,
+      HOME: Quickshell.env("HOME") || "",
+      LANG: Quickshell.env("LANG") || "C.UTF-8",
+      TV_HOST: root.host,
+      TV_RESUME_APP: root.resumeLastApp ? "1" : "0"
+    }
+    var pass = [
+      "USER", "LOGNAME",
+      "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+      "HYPRLAND_INSTANCE_SIGNATURE",
+      "LC_ALL", "LC_CTYPE",
+      "TV_APPS_FILE", "TV_NAME", "TV_MAC"
+    ]
+    for (var i = 0; i < pass.length; i++) {
+      var value = Quickshell.env(pass[i])
+      if (value !== undefined && value !== null && String(value) !== "")
+        env[pass[i]] = String(value)
+    }
+    return env
+  }
+
+  // Feed one stdout/stderr chunk through the line ceiling. On overflow the
+  // buffer is dropped and the process is killed; nothing from that chunk is
+  // parsed. Same shape as a capped reader that discards past the ceiling.
+  function takeLines(buffer, chunk, onLine, proc) {
+    var split = Bounds.splitLines(buffer, chunk, Bounds.DAEMON_LINE_MAX)
+    if (split.overflow) {
+      if (proc.running) proc.signal(9)
+      return ""
+    }
+    for (var i = 0; i < split.lines.length; i++) onLine(split.lines[i])
+    return split.rest
+  }
+
+  function onDaemonStdout(chunk) {
+    daemonBuf = root.takeLines(daemonBuf, chunk, function(line) {
+      root.handleLine(line)
+    }, daemon)
+  }
+
+  function onDaemonStderr(chunk) {
+    daemonErrBuf = root.takeLines(daemonErrBuf, chunk, function(line) {
+      root.errorText = line
+    }, daemon)
+  }
+
+  function onStateStdout(chunk) {
+    stateBuf = root.takeLines(stateBuf, chunk, function(line) {
+      root.handleLine(line)
+    }, stateProc)
+  }
+
+  function discardHotkey() {
+    // Kill and drop the bind dump. Do not parse what already arrived.
+    hotkeyDiscarded = true
+    hotkeyChecked = true
+    if (hotkeyProc.running) hotkeyProc.signal(9)
+  }
 
   // Keys pressed before the child is up (the panel starts it on open, and a
   // fast click can beat it) wait here rather than being dropped.
@@ -335,13 +413,21 @@ Panel {
 
   Process {
     id: daemon
-    command: [root.helper, "serve"]
-    environment: ({ "TV_HOST": root.host,
-                    "TV_RESUME_APP": root.resumeLastApp ? "1" : "0" })
+    command: [root.python3Bin, "-I", "-B", root.helper, "serve"]
+    clearEnvironment: true
+    environment: root.launchEnvironment()
     stdinEnabled: true
-    stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
-    stderr: SplitParser { onRead: function(line) { root.errorText = line } }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) { root.onDaemonStdout(chunk) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) { root.onDaemonStderr(chunk) }
+    }
     onStarted: {
+      root.daemonBuf = ""
+      root.daemonErrBuf = ""
       var queue = root.pendingKeys
       root.pendingKeys = []
       for (var i = 0; i < queue.length; i++) daemon.write(queue[i] + "\n")
@@ -364,10 +450,26 @@ Panel {
   // to match on.
   Process {
     id: hotkeyProc
-    command: ["hyprctl", "binds", "-j"]
+    command: [root.hyprctlBin, "binds", "-j"]
+    clearEnvironment: true
+    environment: root.launchEnvironment()
     stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.readHotkey(text)
+      id: hotkeyOut
+      // False so the byte cap can kill the process as soon as the ceiling
+      // is crossed, instead of after the whole stream has been buffered.
+      waitForEnd: false
+      onDataChanged: {
+        if (Bounds.exceedsByteCap(data.byteLength, Bounds.HOTKEY_BYTE_MAX))
+          root.discardHotkey()
+      }
+      onStreamFinished: {
+        if (root.hotkeyDiscarded
+            || Bounds.exceedsByteCap(data.byteLength, Bounds.HOTKEY_BYTE_MAX)) {
+          root.discardHotkey()
+          return
+        }
+        root.readHotkey(text)
+      }
     }
   }
 
@@ -411,9 +513,14 @@ Panel {
   // at the TV, no remote-control socket and no pairing involved.
   Process {
     id: stateProc
-    command: [root.helper, "state"]
-    environment: ({ "TV_HOST": root.host })
-    stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
+    command: [root.python3Bin, "-I", "-B", root.helper, "state"]
+    clearEnvironment: true
+    environment: root.launchEnvironment()
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) { root.onStateStdout(chunk) }
+    }
+    onStarted: root.stateBuf = ""
   }
 
   Timer {
@@ -490,7 +597,10 @@ Panel {
       else send("state")
       // Once per shell session: the binding does not change under us, and
       // the bind table is a few thousand lines to parse.
-      if (!hotkeyChecked && !hotkeyProc.running) hotkeyProc.running = true
+      if (!hotkeyChecked && !hotkeyProc.running) {
+        hotkeyDiscarded = false
+        hotkeyProc.running = true
+      }
     } else {
       // Never leave a key down: the TV would keep repeating with the panel
       // gone. (tvctl releases on exit too, but the panel should not rely on
@@ -699,7 +809,7 @@ Panel {
             // Omarchy (omarchy -> uwsm -> python), so a missing interpreter
             // is not the likely cause, and shipping a privileged command in
             // a plugin earns a manual review it does not need.
-            text: "It needs python3 on PATH, and tvctl must be executable. "
+            text: "It needs /usr/bin/python3, and tvctl must be executable. "
                   + "Check the helper, then try again:"
             color: Color.muted
             width: parent.width

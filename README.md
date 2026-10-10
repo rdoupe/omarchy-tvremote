@@ -87,8 +87,8 @@ A partly-supported TV is still worth having:
 
 **Python 3 and nothing else.** No pip, no AUR, no `websocket-client`: `tvctl`
 implements the handful of RFC6455 frames the TV needs with the standard
-library, and imports only `base64 hashlib json os re socket ssl stat struct
-sys tempfile threading time`.
+library, and imports only `base64 contextlib hashlib json os re secrets
+socket ssl stat struct sys threading time`.
 
 Omarchy already guarantees Python — `omarchy` depends on `uwsm`, which depends
 on `python` — so on a stock install there is nothing to install. If the helper

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Backend for the Samsung TV remote bar widget.
 
 The TV (a Tizen set with TokenAuthSupport) takes remote keys over a WebSocket
@@ -20,18 +20,23 @@ separately over UPnP RenderingControl on port 9197, which is what lets the
 panel show a real number instead of a guess.
 """
 import base64
+import contextlib
 import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
 import stat
 import struct
 import sys
-import tempfile
 import threading
 import time
+
+# The panel launches this file as `/usr/bin/python3 -I -B`. -B is the
+# interpreter flag; this covers any other import path.
+sys.dont_write_bytecode = True
 
 # Empty means "find it" -- a published plugin cannot ship someone's IP, and a
 # TV that moves on DHCP would otherwise silently stop working.
@@ -256,64 +261,222 @@ def plain(text, limit=64):
                   "", str(text))[:limit]
 
 
-def read_small(path, follow=False, limit=MAX_STATE):
-    """A whole small file, or OSError.
+# Every state and config path is opened from a directory fd held with
+# O_DIRECTORY|O_NOFOLLOW. Leaf opens and the replace rename are relative to
+# that fd, so a symlink swapped in at the leaf or at a parent cannot redirect
+# the read or the write. Nothing here follows a symlink, including the app
+# config.
+DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+FILE_WRITE_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+)
 
-    Regular files only, and never more than MAX_STATE: a FIFO or device node
-    planted at one of these paths would otherwise block or flood the reader.
-    O_NONBLOCK keeps the open itself from hanging on a FIFO. State files are
-    never symlinks, so those are refused; the app config may legitimately be
-    one (dotfile managers link ~/.config), so it follows them.
-    """
-    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
-    if not follow:
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags)
+
+def _split_abs(path):
+    """Absolute path components, with no empty, '.' or '..' entries."""
+    if not isinstance(path, str) or "\x00" in path or not path.startswith(os.sep):
+        raise OSError("refusing an unsafe path")
+    if path != os.sep and path.endswith(os.sep):
+        path = path.rstrip(os.sep)
+    names = path.split(os.sep)[1:]
+    if not names or any(name in ("", ".", "..") for name in names):
+        raise OSError("refusing an unsafe path")
+    return names
+
+
+def _is_state_path(path):
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"not a regular file: {path}")
-        data = bytearray()
-        while len(data) <= limit:
-            chunk = os.read(fd, limit + 1 - len(data))
-            if not chunk:
-                break
-            data += chunk
+        state = os.path.abspath(STATE_DIR)
+        target = os.path.abspath(path)
+        return os.path.commonpath([state, target]) == state
+    except (TypeError, ValueError):
+        return False
+
+
+def _open_root():
+    return os.open(os.sep, DIR_OPEN_FLAGS)
+
+
+def _open_dir_at(parent_fd, name, create):
+    """One path component, never following a symlink."""
+    fd = None
+    try:
+        fd = os.open(name, DIR_OPEN_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            raise
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        fd = os.open(name, DIR_OPEN_FLAGS, dir_fd=parent_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError("not a directory")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _require_owned_dir(fd):
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise OSError("refusing a directory that is not ours")
+    return info
+
+
+def _seal_private_dir(fd):
+    """State directory: ours, and not group- or world-accessible."""
+    info = _require_owned_dir(fd)
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        os.fchmod(fd, 0o700)
+        info = os.fstat(fd)
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise OSError("refusing a state directory others can access")
+    return info
+
+
+def _leaf_kind(dfd, name):
+    try:
+        info = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink"
+    if stat.S_ISREG(info.st_mode):
+        return "file"
+    if stat.S_ISDIR(info.st_mode):
+        return "dir"
+    return "other"
+
+
+@contextlib.contextmanager
+def parent_dir(path, create=False, private=False):
+    """Yield (dir_fd, leaf name) for `path`'s parent.
+
+    The directory fd was opened with O_DIRECTORY|O_NOFOLLOW, walked one
+    component at a time from the filesystem root. The caller opens and
+    renames leaves with dir_fd= / src_dir_fd= / dst_dir_fd= only.
+    """
+    names = _split_abs(path)
+    leaf = names[-1]
+    fd = _open_root()
+    try:
+        for name in names[:-1]:
+            child = _open_dir_at(fd, name, create)
+            os.close(fd)
+            fd = child
+        if private:
+            _seal_private_dir(fd)
+        else:
+            _require_owned_dir(fd)
+        yield fd, leaf
     finally:
         os.close(fd)
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
+    os.fsync(fd)
+
+
+def _temp_name():
+    return ".tv.{}.{}".format(os.getpid(), secrets.token_hex(8))
+
+
+def read_small(path, limit=MAX_STATE, *, private=None):
+    """A whole small regular file, or OSError.
+
+    The parent directory is held with O_DIRECTORY|O_NOFOLLOW and the leaf is
+    opened relative to that fd, also with O_NOFOLLOW. Symlinks are refused
+    at every component, including the app config. FIFOs and other non-regular
+    nodes are rejected after an O_NONBLOCK open so they cannot block or flood
+    the reader. Never more than `limit` bytes.
+    """
+    if private is None:
+        private = _is_state_path(path)
+    if not isinstance(limit, int) or limit < 0:
+        raise OSError("refusing a negative read limit")
+    with parent_dir(path, create=False, private=private) as (dfd, name):
+        fd = os.open(name, FILE_READ_FLAGS, dir_fd=dfd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                raise OSError(f"not a regular file of ours: {path}")
+            if info.st_size > limit:
+                raise OSError(f"too large: {path}")
+            data = bytearray()
+            while len(data) <= limit:
+                chunk = os.read(fd, limit + 1 - len(data))
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            os.close(fd)
     if len(data) > limit:
         raise OSError(f"too large: {path}")
     return bytes(data).decode("utf-8", "replace")
 
 
-def write_private(path, text):
-    """Replace `path` atomically with a fresh 0600 file.
+def write_private(path, text, *, private=None):
+    """Replace `path` with a fresh 0600 file, without following a symlink.
 
-    The data goes to a new, uniquely named temp file -- mkstemp opens it
-    O_CREAT|O_EXCL with mode 0600, so nothing pre-placed there (a symlink, a
-    file someone else can read) is ever written through -- and is then
-    renamed over the target. rename() replaces a symlink rather than
-    following it, so a link at `path` cannot redirect the write either.
+    The parent directory fd is held with O_DIRECTORY|O_NOFOLLOW. The bytes go
+    to a new O_CREAT|O_EXCL|O_NOFOLLOW temp opened relative to that fd, then
+    os.rename on the same dir fd publishes it. A symlink at the leaf is
+    refused, not replaced and not followed, so the write cannot land on the
+    link's target.
     """
-    directory = os.path.dirname(path)
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory,
-                               prefix="." + os.path.basename(path) + ".")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
+    if private is None:
+        private = _is_state_path(path)
+    data = text.encode("utf-8") if isinstance(text, str) else bytes(text)
+    with parent_dir(path, create=True, private=private) as (dfd, name):
+        kind = _leaf_kind(dfd, name)
+        if kind == "symlink":
+            raise OSError(f"refusing to follow or replace a symlink: {path}")
+        if kind in ("dir", "other"):
+            raise OSError(f"refusing to replace a non-regular file: {path}")
+        tmp = _temp_name()
+        fd = os.open(tmp, FILE_WRITE_FLAGS, 0o600, dir_fd=dfd)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            _write_all(fd, data)
+            os.fchmod(fd, 0o600)
+            os.close(fd)
+            fd = None
+            os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            tmp = None
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if tmp is not None:
+                try:
+                    os.unlink(tmp, dir_fd=dfd)
+                except OSError:
+                    pass
+
+
+def remove_private(path):
+    """Unlink `path`'s leaf relative to its no-follow parent directory fd.
+
+    unlink does not follow a final symlink, so a link planted at the leaf is
+    removed and its target is left alone.
+    """
+    with parent_dir(path, create=False, private=_is_state_path(path)) as (dfd, name):
+        os.unlink(name, dir_fd=dfd)
 
 
 def load_apps():
     """Configured apps, seeding the file from DEFAULT_APPS on first run."""
     try:
-        data = json.loads(read_small(APPS_FILE, follow=True, limit=MAX_CONFIG))
+        data = json.loads(read_small(APPS_FILE, limit=MAX_CONFIG))
         apps = data.get("apps") if isinstance(data, dict) else data
         cleaned = []
         for a in (apps if isinstance(apps, list) else [])[:MAX_APPS]:
@@ -1971,7 +2134,7 @@ def main(argv):
                         ("last app", LAST_APP_FILE), ("apps", APPS_FILE)]
         for label, path in targets:
             try:
-                os.remove(path)
+                remove_private(path)
                 removed.append(label)
             except OSError:
                 pass
