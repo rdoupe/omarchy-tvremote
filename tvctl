@@ -531,9 +531,26 @@ def local_ipv4():
         sock.close()
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Treat every 3xx as an error instead of following it.
+
+    The stock handler drains the whole redirect body with an unbounded read()
+    before following, which would let any LAN responder sidestep MAX_HTTP.
+    Nothing here ever needs a redirect, so refusing is enough: returning None
+    makes urllib raise HTTPError without touching the body.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Every HTTP request goes through this, never bare urlopen().
+_http = urllib.request.build_opener(_NoRedirect)
+
+
 def fetch_json(url, timeout=3):
     """GET and parse JSON, refusing to buffer more than MAX_HTTP."""
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    with _http.open(url, timeout=timeout) as resp:
         raw = resp.read(MAX_HTTP + 1)
     if len(raw) > MAX_HTTP:
         raise ValueError("response too large")
@@ -833,7 +850,7 @@ def soap(action, body, timeout=3):
         "Content-Type": 'text/xml; charset="utf-8"',
         "SOAPACTION": f'"{service}#{action}"',
     })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _http.open(req, timeout=timeout) as resp:
         return resp.read(MAX_HTTP).decode(errors="replace")
 
 
@@ -897,7 +914,7 @@ def launch_app(key):
         raise KeyError(key)
     req = urllib.request.Request(
         f"http://{HOST}:{API_PORT}/api/v2/applications/{app['appId']}", method="POST")
-    with urllib.request.urlopen(req, timeout=8) as resp:
+    with _http.open(req, timeout=8) as resp:
         return resp.status == 200
 
 
