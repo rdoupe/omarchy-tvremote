@@ -340,8 +340,10 @@ def load_apps():
                 "glyph": str(a.get("glyph") or default_glyph(name)),
                 "show": a.get("show", True) is not False,
             })
-        if cleaned:
-            return cleaned
+        # An empty list is a real result: a scan that heard the TV and found
+        # nothing installed. Only a missing or unreadable file falls through
+        # to the defaults below.
+        return cleaned
     except FileNotFoundError:
         save_apps(DEFAULT_APPS)
     except Exception:

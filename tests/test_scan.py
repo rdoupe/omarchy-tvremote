@@ -102,7 +102,21 @@ class ScanResultTests(unittest.TestCase):
             self.assertEqual(found, [])
             tvctl._scan_and_report()
         self.assertEqual(self.saved_ids(), [])
+        # The empty file must stay empty. Treating it as "first run" would
+        # put the default apps back on screen after the TV rejected them.
+        self.assertEqual(tvctl.load_apps(), [])
         self.assertFalse(any(e.get("type") == "error" for e in self.events))
+        apps_event = [e for e in self.events if e.get("type") == "apps"]
+        self.assertEqual(apps_event[-1]["apps"], [])
+
+    def test_missing_config_still_seeds_defaults(self):
+        path = Path(tvctl.APPS_FILE)
+        path.unlink(missing_ok=True)
+        loaded = tvctl.load_apps()
+        self.assertEqual(
+            [a["appId"] for a in loaded],
+            [a["appId"] for a in tvctl.DEFAULT_APPS])
+        self.assertTrue(path.is_file())
 
     def test_404_drops_timeout_keeps_200_keeps(self):
         self.write_apps([
