@@ -65,6 +65,10 @@ Panel {
   // there. Tracked because the prompt lives exactly as long as the
   // connection that raised it -- see closeDaemonIfIdle().
   property bool pairing: false
+  // The TV has accepted that request, so its prompt really is up now --
+  // before this, the helper is still reaching the TV and the user has
+  // nothing to look at yet.
+  property bool pairSent: false
   // Nothing below the header is usable in either state.
   readonly property bool blocked: picking || needsPairing || helperBroken
   property string wakeTarget: ""
@@ -287,6 +291,7 @@ Panel {
       foregroundApp = String(msg.app || "")
     } else if (msg.type === "pairing") {
       pairing = true
+      if (msg.sent) pairSent = true
       pairingTimeout.restart()
     } else if (msg.type === "connected") {
       linkUp = true
@@ -453,7 +458,10 @@ Panel {
   }
 
   onWakingChanged: closeDaemonIfIdle()
-  onPairingChanged: closeDaemonIfIdle()
+  onPairingChanged: {
+    if (!pairing) pairSent = false
+    closeDaemonIfIdle()
+  }
 
   onOpenedChanged: {
     if (opened) {
@@ -763,12 +771,18 @@ Panel {
           spacing: Style.space(6)
           visible: root.needsPairing
 
+          // Once the request has reached the TV this is the one thing that
+          // matters, and the user is likely across the room -- so it is the
+          // biggest text in the panel.
           Text {
             textFormat: Text.PlainText
-            text: "Look at your TV"
+            text: root.pairSent ? "Look at your TV and approve" : "Look at your TV"
             color: root.fg
+            width: parent.width
+            wrapMode: Text.WordWrap
+            horizontalAlignment: root.pairSent ? Text.AlignHCenter : Text.AlignLeft
             font.family: root.fontFamily
-            font.pixelSize: Style.font.subtitle
+            font.pixelSize: root.pairSent ? Style.font.display : Style.font.subtitle
             font.bold: true
           }
 

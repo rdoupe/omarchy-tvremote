@@ -510,7 +510,7 @@ def channel_endpoints():
     return [(WS_PORT, True), (API_PORT, False)]
 
 
-def connect(timeout=8, _after_pairing=False):
+def connect(timeout=8, _after_pairing=False, on_prompt=None):
     """Open the remote-control channel. Returns (socket, newly_paired).
 
     Without a saved token the TV puts an Allow/Deny prompt on screen and says
@@ -520,6 +520,10 @@ def connect(timeout=8, _after_pairing=False):
     `_after_pairing` marks the one reconnect this may make on its own, and
     caps it at one: the TV hands over a token and then drops the socket, so
     the useful connection is the *next* one.
+
+    `on_prompt` is called once a tokenless request has been accepted by the
+    TV -- the moment its Allow/Deny prompt goes up -- so a caller can tell
+    "asking" apart from "the question is on screen".
     """
     token = load_token()
     path = ("/api/v2/channels/samsung.remote.control?name="
@@ -549,6 +553,8 @@ def connect(timeout=8, _after_pairing=False):
     if ws is None:
         raise last if last else ConnectionError("no remote-control channel")
     ws.sock.settimeout(timeout if token else 45)
+    if not token and on_prompt is not None:
+        on_prompt()
     try:
         while True:
             msg = json.loads(ws.recv())
@@ -1384,7 +1390,9 @@ class Server:
             prompting = not load_token()
             if prompting:
                 emit({"type": "pairing"})
-            ws, newly_paired = connect()
+            ws, newly_paired = connect(on_prompt=(
+                lambda: emit({"type": "pairing", "sent": True}))
+                if prompting else None)
             with self.lock:
                 self.generation += 1
                 self.ws = ws
