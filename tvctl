@@ -32,7 +32,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.request
 
 # Empty means "find it" -- a published plugin cannot ship someone's IP, and a
 # TV that moves on DHCP would otherwise silently stop working.
@@ -46,7 +45,8 @@ SDB_PORT = 26101           # Tizen developer mode; only open when it is on
 # Nothing it says is allowed to make this process allocate without bound.
 MAX_FRAME = 1 << 20        # 1 MiB; real frames here are a few hundred bytes
 MAX_HTTP = 1 << 20         # 1 MiB; the largest real reply is ~1.5 KB
-MAX_STATE = 64 << 10       # 64 KiB; state files are one line, the app list ~5 KB
+MAX_STATE = 64 << 10       # 64 KiB; state files are one line
+MAX_CONFIG = 1 << 20       # the app list is ~5 KB; MAX_APPS entries fit easily
 # Also untrusted: how many ids the developer-mode list may hand to a scan, and
 # how many probes run at once. A real TV lists a few dozen launchable apps;
 # without a cap every row became its own thread and request.
@@ -256,7 +256,7 @@ def plain(text, limit=64):
                   "", str(text))[:limit]
 
 
-def read_small(path, follow=False):
+def read_small(path, follow=False, limit=MAX_STATE):
     """A whole small file, or OSError.
 
     Regular files only, and never more than MAX_STATE: a FIFO or device node
@@ -272,12 +272,17 @@ def read_small(path, follow=False):
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"not a regular file: {path}")
-        data = os.read(fd, MAX_STATE + 1)
+        data = bytearray()
+        while len(data) <= limit:
+            chunk = os.read(fd, limit + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
     finally:
         os.close(fd)
-    if len(data) > MAX_STATE:
+    if len(data) > limit:
         raise OSError(f"too large: {path}")
-    return data.decode("utf-8", "replace")
+    return bytes(data).decode("utf-8", "replace")
 
 
 def write_private(path, text):
@@ -308,7 +313,7 @@ def write_private(path, text):
 def load_apps():
     """Configured apps, seeding the file from DEFAULT_APPS on first run."""
     try:
-        data = json.loads(read_small(APPS_FILE, follow=True))
+        data = json.loads(read_small(APPS_FILE, follow=True, limit=MAX_CONFIG))
         apps = data.get("apps") if isinstance(data, dict) else data
         cleaned = []
         for a in (apps if isinstance(apps, list) else [])[:MAX_APPS]:
@@ -635,47 +640,110 @@ def local_ipv4():
         sock.close()
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Treat every 3xx as an error instead of following it.
-
-    The stock handler drains the whole redirect body with an unbounded read()
-    before following, which would let any LAN responder sidestep MAX_HTTP.
-    Nothing here ever needs a redirect, so refusing is enough: returning None
-    makes urllib raise HTTPError without touching the body.
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+MAX_HEAD = 64 << 10        # status line + headers; real ones are ~300 bytes
 
 
-# Every HTTP request goes through this, never bare urlopen(). An empty
-# ProxyHandler, too: these are all LAN addresses, and an http_proxy in the
-# environment would otherwise route TV traffic through some other host.
-_http = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+def http_request(method, host, port, path, body=b"", headers=None, timeout=3):
+    """One HTTP/1.1 request on a fresh socket. Returns (status, body).
 
-
-def read_body(resp, timeout):
-    """At most MAX_HTTP of a response body, within a fixed overall time.
-
-    `timeout` on its own applies per recv, so a server sending one byte just
-    inside it each time could stretch a single request out for days.
+    Hand-rolled rather than urllib because every byte of the reply comes
+    from the LAN, and urllib's limits are per-recv only: a server trickling
+    its status line, headers or chunk-size lines one byte at a time held a
+    request open indefinitely, and its redirect handler drained 3xx bodies
+    with no size cap at all. Here one deadline covers the whole exchange,
+    every part of the reply is capped, redirects are never followed (a 3xx
+    is just a status), and no proxy is ever consulted.
     """
     deadline = time.monotonic() + timeout * 2
-    raw = bytearray()
-    while len(raw) <= MAX_HTTP:
-        if time.monotonic() > deadline:
-            raise TimeoutError("response too slow")
-        chunk = resp.read1(MAX_HTTP + 1 - len(raw))
-        if not chunk:
-            return bytes(raw)
-        raw += chunk
-    raise ValueError("response too large")
+    lines = [f"{method} {path} HTTP/1.1", f"Host: {host}:{port}",
+             "Connection: close", "Accept-Encoding: identity",
+             f"Content-Length: {len(body)}"]
+    lines += [f"{k}: {v}" for k, v in (headers or {}).items()]
+    buf = bytearray()
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + body)
+
+        def fill():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("reply too slow")
+            sock.settimeout(min(left, timeout))
+            chunk = sock.recv(65536)
+            buf.extend(chunk)
+            return bool(chunk)
+
+        def until(marker, cap):
+            """Index of `marker` in buf, reading as needed, within `cap`."""
+            start = 0
+            while True:
+                at = buf.find(marker, start)
+                if at >= 0:
+                    return at
+                if len(buf) > cap:
+                    raise ValueError("reply too large")
+                start = max(0, len(buf) - len(marker) + 1)
+                if not fill():
+                    raise ConnectionError("reply cut short")
+
+        end = until(b"\r\n\r\n", MAX_HEAD)
+        head = bytes(buf[:end]).decode("latin-1").split("\r\n")
+        del buf[:end + 4]
+        status = head[0].split(" ", 2)
+        if len(status) < 2 or not status[0].startswith("HTTP/1.") \
+                or not (status[1].isdigit() and len(status[1]) == 3):
+            raise ConnectionError("not an HTTP reply")
+        code = int(status[1])
+        if not 200 <= code < 300:
+            # Redirects and errors carry nothing any caller uses, so their
+            # bodies are never read -- a 3xx is a status, not an instruction.
+            return code, b""
+        fields = {}
+        for line in head[1:]:
+            name, sep, value = line.partition(":")
+            if sep:
+                fields[name.strip().lower()] = value.strip()
+
+        if "chunked" in fields.get("transfer-encoding", "").lower():
+            out = bytearray()
+            while True:
+                eol = until(b"\r\n", 64)
+                size = bytes(buf[:eol]).split(b";", 1)[0].strip()
+                del buf[:eol + 2]
+                if not size or len(size) > 8 or not all(
+                        c in b"0123456789abcdefABCDEF" for c in size):
+                    raise ConnectionError("bad chunk size")
+                n = int(size, 16)
+                if n == 0:
+                    break                     # trailers, if any, are ignored
+                if len(out) + n > MAX_HTTP:
+                    raise ValueError("reply too large")
+                while len(buf) < n + 2:
+                    if not fill():
+                        raise ConnectionError("reply cut short")
+                out += buf[:n]
+                del buf[:n + 2]
+            data = bytes(out)
+        elif "content-length" in fields:
+            length = fields["content-length"]
+            if not length.isdigit() or int(length) > MAX_HTTP:
+                raise ValueError("reply too large")
+            while len(buf) < int(length):
+                if not fill():
+                    raise ConnectionError("reply cut short")
+            data = bytes(buf[:int(length)])
+        else:
+            while fill():
+                if len(buf) > MAX_HTTP:
+                    raise ValueError("reply too large")
+            data = bytes(buf)
+    return code, data
 
 
-def fetch_json(url, timeout=3):
-    """GET and parse JSON, refusing to buffer more than MAX_HTTP."""
-    with _http.open(url, timeout=timeout) as resp:
-        raw = read_body(resp, timeout)
+def fetch_json(host, port, path, timeout=3):
+    """GET and parse JSON; anything but a 200 is an error."""
+    status, raw = http_request("GET", host, port, path, timeout=timeout)
+    if status != 200:
+        raise ConnectionError(f"HTTP {status}")
     return json.loads(raw.decode("utf-8", "replace"))
 
 
@@ -698,7 +766,7 @@ def identify(ip, timeout=2):
     # from the TV picker on the daemon's main loop, where it would kill the
     # process outright.
     try:
-        data = fetch_json(f"http://{ip}:{API_PORT}/api/v2/", timeout)
+        data = fetch_json(ip, API_PORT, "/api/v2/", timeout)
         if not isinstance(data, dict):
             return None
         device = data.get("device")
@@ -961,7 +1029,6 @@ def power_on(send_power, on_progress=None, timeout=80):
 
 
 def soap(action, body, timeout=3):
-    url = f"http://{HOST}:{UPNP_PORT}/upnp/control/RenderingControl1"
     service = "urn:schemas-upnp-org:service:RenderingControl:1"
     envelope = (
         '<?xml version="1.0"?>'
@@ -971,12 +1038,13 @@ def soap(action, body, timeout=3):
         f'<Channel>Master</Channel>{body}</u:{action}>'
         "</s:Body></s:Envelope>"
     )
-    req = urllib.request.Request(url, data=envelope.encode(), headers={
-        "Content-Type": 'text/xml; charset="utf-8"',
-        "SOAPACTION": f'"{service}#{action}"',
-    })
-    with _http.open(req, timeout=timeout) as resp:
-        return read_body(resp, timeout).decode(errors="replace")
+    status, reply = http_request(
+        "POST", HOST, UPNP_PORT, "/upnp/control/RenderingControl1",
+        envelope.encode(), {"Content-Type": 'text/xml; charset="utf-8"',
+                            "SOAPACTION": f'"{service}#{action}"'}, timeout)
+    if status != 200:
+        raise ConnectionError(f"HTTP {status}")
+    return reply.decode(errors="replace")
 
 
 def read_volume(timeout=3):
@@ -1001,7 +1069,7 @@ def read_device(timeout=3):
     # Parsed entirely inside the guard, like identify(): a reply of the
     # wrong shape must read as "not a TV", never raise into a poll thread.
     try:
-        data = fetch_json(f"http://{HOST}:{API_PORT}/api/v2/", timeout)
+        data = fetch_json(HOST, API_PORT, "/api/v2/", timeout)
         device = data.get("device") if isinstance(data, dict) else None
         if not isinstance(device, dict):
             device = {}
@@ -1031,7 +1099,7 @@ def app_status(app_id, timeout=3):
         return None
     try:
         info = fetch_json(
-            f"http://{HOST}:{API_PORT}/api/v2/applications/{app_id}", timeout)
+            HOST, API_PORT, f"/api/v2/applications/{app_id}", timeout)
     except Exception:
         return None
     return info if isinstance(info, dict) else None
@@ -1049,10 +1117,11 @@ def launch_app(key):
         raise KeyError(key)
     if not valid_app_id(app["appId"]):
         raise ValueError(f"bad app id for {key}")
-    req = urllib.request.Request(
-        f"http://{HOST}:{API_PORT}/api/v2/applications/{app['appId']}", method="POST")
-    with _http.open(req, timeout=8) as resp:
-        return resp.status == 200
+    status, _ = http_request(
+        "POST", HOST, API_PORT, f"/api/v2/applications/{app['appId']}", timeout=8)
+    if status >= 300:
+        raise ConnectionError(f"HTTP {status}")
+    return status == 200
 
 
 def foreground_app(timeout=3):
@@ -1259,17 +1328,19 @@ def scan_apps(timeout=3):
     queue = list(catalog.items())
     qlock = threading.Lock()
 
+    # Each probe is bounded, so this is generous; a straggler past it is
+    # abandoned rather than allowed to hold the scan open, and no worker
+    # starts a new probe once it has passed.
+    deadline = time.monotonic() + (timeout * 3) * (len(queue) // SCAN_WORKERS + 2)
+
     def worker():
-        while True:
+        while time.monotonic() < deadline:
             with qlock:
                 if not queue:
                     return
                 app_id, name = queue.pop()
             probe(app_id, name)
 
-    # Each probe is bounded, so this is generous; a straggler past it is
-    # abandoned rather than allowed to hold the scan open.
-    deadline = time.monotonic() + (timeout * 3) * (len(queue) // SCAN_WORKERS + 2)
     threads = [threading.Thread(target=worker, daemon=True)
                for _ in range(min(SCAN_WORKERS, len(queue)))]
     for t in threads:
@@ -1308,8 +1379,14 @@ def scan_apps(timeout=3):
 
 
 def merge_apps(found):
-    """Scan results become the new config, keeping existing keys and colors."""
-    return [dict(a) for a in found]
+    """Scan results become the new config, keeping existing keys and colors.
+
+    Pins are re-read here rather than taken from when the scan started: a
+    scan takes seconds, and a tile pinned meanwhile must not be undone.
+    Call with CONFIG_LOCK held, up to the save.
+    """
+    pinned = {a["appId"]: a["show"] for a in load_apps()}
+    return [dict(a, show=pinned.get(a["appId"], a["show"])) for a in found]
 
 
 def state_payload(with_volume=True, with_app=True):
@@ -1440,7 +1517,7 @@ class Server:
                     stale.close()
                 if attempt:
                     emit({"type": "error", "key": name,
-                          "msg": f"{type(exc).__name__}: {exc}"})
+                          "msg": f"{type(exc).__name__}: {plain(exc, 200)}"})
                     return False
         return False
 
@@ -1478,7 +1555,7 @@ def _warm(server):
             emit({"type": "error",
                   "msg": "Accept the connection prompt on the TV, then reopen"})
         else:
-            emit({"type": "error", "msg": f"{type(exc).__name__}: {exc}"})
+            emit({"type": "error", "msg": f"{type(exc).__name__}: {plain(exc, 200)}"})
 
 
 def dispatch(cmd, server, held_since, pressed_at):
@@ -1498,15 +1575,12 @@ def dispatch(cmd, server, held_since, pressed_at):
     if cmd.startswith("pick:"):
         ip = cmd[5:]
         if not valid_ipv4(ip):
-            emit({"type": "error", "msg": f"not an address: {ip}"})
+            emit({"type": "error", "msg": f"not an address: {plain(ip)}"})
             return True
-        info = choose_host(ip)
-        emit({"type": "picked", "ip": ip,
-              "name": info["name"] if info else ip})
-        emit({"type": "apps", "apps": load_apps()})
-        threading.Thread(
-            target=lambda: emit(state_payload()), daemon=True).start()
-        threading.Thread(target=_warm, args=(server,), daemon=True).start()
+        # Off the stdin loop: identifying the TV is a network round trip,
+        # and keys typed meanwhile should not queue up behind it.
+        threading.Thread(target=_pick_and_report, args=(ip, server),
+                         daemon=True).start()
         return True
     if cmd == "rediscover":
         threading.Thread(target=_rediscover, daemon=True).start()
@@ -1520,7 +1594,7 @@ def dispatch(cmd, server, held_since, pressed_at):
         # whatever happened to be on screen last.
         target = cmd[5:] if cmd.startswith("wake:") else ""
         if target and app_by_key(target) is None:
-            emit({"type": "error", "msg": f"unknown app: {target}"})
+            emit({"type": "error", "msg": f"unknown app: {plain(target)}"})
             return True
         threading.Thread(target=_wake_and_watch,
                          args=(server, target), daemon=True).start()
@@ -1532,7 +1606,7 @@ def dispatch(cmd, server, held_since, pressed_at):
         if toggle_pin(cmd[4:]):
             emit({"type": "apps", "apps": load_apps()})
         else:
-            emit({"type": "error", "msg": f"unknown app: {cmd[4:]}"})
+            emit({"type": "error", "msg": f"unknown app: {plain(cmd[4:])}"})
         return True
     if cmd == "scan":
         threading.Thread(target=_scan_and_report, daemon=True).start()
@@ -1540,7 +1614,7 @@ def dispatch(cmd, server, held_since, pressed_at):
     if cmd.startswith("press:") or cmd.startswith("release:"):
         verb, _, name = cmd.partition(":")
         if name not in KEYS:
-            emit({"type": "error", "msg": f"unknown key: {name}"})
+            emit({"type": "error", "msg": f"unknown key: {plain(name)}"})
             return True
         now = time.monotonic()
         if verb == "press":
@@ -1567,13 +1641,13 @@ def dispatch(cmd, server, held_since, pressed_at):
     if cmd.startswith("app:"):
         key = cmd[4:]
         if app_by_key(key) is None:
-            emit({"type": "error", "msg": f"unknown app: {key}"})
+            emit({"type": "error", "msg": f"unknown app: {plain(key)}"})
         else:
             threading.Thread(target=_launch_and_report,
                              args=(key,), daemon=True).start()
         return True
     if cmd not in KEYS:
-        emit({"type": "error", "msg": f"unknown key: {cmd}"})
+        emit({"type": "error", "msg": f"unknown key: {plain(cmd)}"})
         return True
     if server.key(cmd):
         emit({"type": "ack", "key": cmd})
@@ -1627,7 +1701,7 @@ def serve():
                 # This daemon parses replies from an appliance and from
                 # whatever else answers on the LAN. One unforeseen shape
                 # should degrade to an error line, never kill the widget.
-                emit({"type": "error", "msg": f"{type(exc).__name__}: {exc}"})
+                emit({"type": "error", "msg": f"{type(exc).__name__}: {plain(exc, 200)}"})
                 continue
             if handled == "quit":
                 break
@@ -1640,14 +1714,15 @@ def serve():
 
 
 def toggle_pin(key):
-    apps = load_apps()
-    hit = False
-    for a in apps:
-        if a["key"] == key:
-            a["show"] = not a["show"]
-            hit = True
-    if hit:
-        save_apps(apps)
+    with CONFIG_LOCK:
+        apps = load_apps()
+        hit = False
+        for a in apps:
+            if a["key"] == key:
+                a["show"] = not a["show"]
+                hit = True
+        if hit:
+            save_apps(apps)
     return hit
 
 
@@ -1661,6 +1736,20 @@ def _deferred_app():
     app = foreground_app()
     if app:
         emit({"type": "app", "app": app})
+
+
+def _pick_and_report(ip, server):
+    try:
+        info = choose_host(ip)
+    except Exception as exc:
+        emit({"type": "error", "msg": f"{type(exc).__name__}: {plain(exc, 200)}"})
+        return
+    emit({"type": "picked", "ip": ip,
+          "name": info["name"] if info else ip})
+    emit({"type": "apps", "apps": load_apps()})
+    threading.Thread(
+        target=lambda: emit(state_payload()), daemon=True).start()
+    _warm(server)
 
 
 def _rediscover():
@@ -1684,7 +1773,7 @@ def _wake_and_watch(server, target=""):
     try:
         ok = power_on(lambda: server.key("power"), on_progress=progress)
     except Exception as exc:
-        emit({"type": "error", "msg": f"wake: {exc}"})
+        emit({"type": "error", "msg": f"wake: {plain(exc, 200)}"})
         return
     if not ok:
         # Almost always one specific TV setting rather than a bug, so say
@@ -1713,6 +1802,9 @@ def _wake_and_watch(server, target=""):
 
 # One scan at a time: two would race to rewrite the same config.
 SCAN_LOCK = threading.Lock()
+# Every read-modify-write of the app config, so a pin and a scan's save
+# cannot interleave.
+CONFIG_LOCK = threading.Lock()
 
 
 def _scan_and_report():
@@ -1722,7 +1814,8 @@ def _scan_and_report():
         emit({"type": "scanning"})
         try:
             found = scan_apps()
-            save_apps(merge_apps(found))
+            with CONFIG_LOCK:
+                save_apps(merge_apps(found))
         except Exception as exc:
             emit({"type": "error", "msg": f"scan: {type(exc).__name__}"})
             return
@@ -1921,5 +2014,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except Exception as exc:
-        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"error: {type(exc).__name__}: {plain(exc, 200)}", file=sys.stderr)
         sys.exit(1)

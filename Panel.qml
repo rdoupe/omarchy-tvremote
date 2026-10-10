@@ -291,7 +291,9 @@ Panel {
       foregroundApp = String(msg.app || "")
     } else if (msg.type === "pairing") {
       pairing = true
-      if (msg.sent) pairSent = true
+      // Every pairing attempt starts over at "asking"; only this attempt's
+      // own `sent` may switch to "approve".
+      pairSent = !!msg.sent
       pairingTimeout.restart()
     } else if (msg.type === "connected") {
       linkUp = true
@@ -335,6 +337,9 @@ Panel {
     onExited: function(exitCode) {
       root.linkUp = false
       root.pendingKeys = []
+      // The prompt lived on this child's connection, so it is gone too.
+      root.pairing = false
+      pairingTimeout.stop()
       // Exited without ever saying anything: the interpreter or the helper
       // itself is missing, not a TV problem.
       if (!root.helperSpoke && exitCode !== 0) root.helperBroken = true
