@@ -67,16 +67,19 @@ TOKEN = re.compile(r"[A-Za-z0-9]{1,64}\Z")
 CLIENT_NAME = os.environ.get("TV_NAME", "Omarchy")
 # Reopen the last app after a wake. Off by setting TV_RESUME_APP=0.
 RESUME_APP = os.environ.get("TV_RESUME_APP", "1") not in ("0", "false", "no")
-STATE_DIR = os.path.expanduser("~/.local/state/omarchy")
-TOKEN_FILE = os.path.join(STATE_DIR, "tvremote-token")
+# A directory of the plugin's own, so sealing it 0700 never touches the
+# ~/.local/state/omarchy it sits in, which Omarchy itself shares.
+LEGACY_STATE_DIR = os.path.expanduser("~/.local/state/omarchy")
+STATE_DIR = os.path.join(LEGACY_STATE_DIR, "tvremote")
+TOKEN_FILE = os.path.join(STATE_DIR, "token")
 # Learned from the TV while it is reachable, so it is still on hand when the
 # set is off -- which is exactly when it is needed, since a TV that is off
 # cannot be asked anything.
-MAC_FILE = os.path.join(STATE_DIR, "tvremote-mac")
+MAC_FILE = os.path.join(STATE_DIR, "mac")
 # The app that was last on screen, so waking the TV can put it back rather
 # than dropping you on the home screen.
-LAST_APP_FILE = os.path.join(STATE_DIR, "tvremote-lastapp")
-HOST_FILE = os.path.join(STATE_DIR, "tvremote-host")
+LAST_APP_FILE = os.path.join(STATE_DIR, "lastapp")
+HOST_FILE = os.path.join(STATE_DIR, "host")
 
 # Names the panel and the CLI use -> Tizen key codes.
 KEYS = {
@@ -298,6 +301,31 @@ def _open_root():
     return os.open(os.sep, DIR_OPEN_FLAGS)
 
 
+def _open_anchor(names):
+    """(dir fd, components left to walk) for an absolute path.
+
+    The home directory is the trusted base, as it is for the sibling
+    plugins: it is resolved once -- a relocated or symlinked $HOME is
+    common and harmless -- then must be ours, and every component below it
+    is walked with O_NOFOLLOW. A path outside home is walked from /.
+    """
+    home = os.environ.get("HOME", "")
+    try:
+        base = _split_abs(home)
+    except OSError:
+        base = None
+    if base and names[:len(base)] == base and len(names) > len(base):
+        fd = os.open(os.path.realpath(home),
+                     os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            _require_owned_dir(fd)
+        except Exception:
+            os.close(fd)
+            raise
+        return fd, names[len(base):]
+    return _open_root(), names
+
+
 def _open_dir_at(parent_fd, name, create):
     """One path component, never following a symlink."""
     fd = None
@@ -358,12 +386,11 @@ def parent_dir(path, create=False, private=False):
     """Yield (dir_fd, leaf name) for `path`'s parent.
 
     The directory fd was opened with O_DIRECTORY|O_NOFOLLOW, walked one
-    component at a time from the filesystem root. The caller opens and
+    component at a time from the home directory (see _open_anchor). The caller opens and
     renames leaves with dir_fd= / src_dir_fd= / dst_dir_fd= only.
     """
-    names = _split_abs(path)
+    fd, names = _open_anchor(_split_abs(path))
     leaf = names[-1]
-    fd = _open_root()
     try:
         for name in names[:-1]:
             child = _open_dir_at(fd, name, create)
@@ -478,8 +505,10 @@ def load_apps():
     try:
         data = json.loads(read_small(APPS_FILE, limit=MAX_CONFIG))
         apps = data.get("apps") if isinstance(data, dict) else data
+        if not isinstance(apps, list):
+            raise ValueError("no app list")   # wrong shape: use the defaults
         cleaned = []
-        for a in (apps if isinstance(apps, list) else [])[:MAX_APPS]:
+        for a in apps[:MAX_APPS]:
             # The id is checked here too, not only when a scan finds it: it
             # ends up in a URL path, and this file can be edited by hand.
             if not isinstance(a, dict) or not valid_app_id(a.get("appId")):
@@ -652,6 +681,36 @@ class WebSocket:
     def close(self):
         try:
             self.sock.close()
+        except OSError:
+            pass
+
+
+def migrate_state():
+    """Move pre-1.4 state files into STATE_DIR, once.
+
+    They used to sit directly in ~/.local/state/omarchy as tvremote-*.
+    Each is copied only when the new one does not exist yet, then the old
+    one is removed. Any failure leaves both where they are: worst case is
+    one more pairing prompt, never a lost or half-written token.
+    """
+    for new in (TOKEN_FILE, HOST_FILE, MAC_FILE, LAST_APP_FILE):
+        old = os.path.join(LEGACY_STATE_DIR,
+                           "tvremote-" + os.path.basename(new))
+        try:
+            data = read_small(old, private=False)
+        except OSError:
+            continue
+        try:
+            read_small(new)
+        except FileNotFoundError:
+            try:
+                write_private(new, data)
+            except OSError:
+                continue
+        except OSError:
+            continue
+        try:
+            remove_private(old)
         except OSError:
             pass
 
@@ -2105,6 +2164,7 @@ def _volume_after(_cmd):
 
 
 def main(argv):
+    migrate_state()
     if argv and argv[0] not in ("-h", "--help", "discover", "pick", "unpair"):
         ensure_host()
         # `serve` is the one command that is useful without a TV: it is what

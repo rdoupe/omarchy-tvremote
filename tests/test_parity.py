@@ -161,6 +161,12 @@ class NoFollowIoTests(unittest.TestCase):
         self.assertEqual(renames[0]["src_dir_fd"], renames[0]["dst_dir_fd"])
         dir_opens = [item for item in opens if item[1] & os.O_DIRECTORY]
         self.assertTrue(dir_opens)
+        # The one exception: the resolved home directory, opened once as the
+        # trusted anchor. Everything below it is walked without following.
+        anchor = os.path.realpath(os.environ["HOME"])
+        anchors = [item for item in dir_opens if item[0] == anchor]
+        self.assertEqual(len(anchors), 1)
+        dir_opens = [item for item in dir_opens if item[0] != anchor]
         for _path, flags, _dir_fd in dir_opens:
             self.assertTrue(flags & os.O_NOFOLLOW)
             self.assertTrue(flags & os.O_DIRECTORY)
@@ -250,6 +256,86 @@ class NoFollowIoTests(unittest.TestCase):
         self.assertTrue(Path(self.tvctl.APPS_FILE).is_symlink())
         self.assertIn("111299001912", secret.read_text(encoding="utf-8"))
         self.assertNotIn("3201907018807", secret.read_text(encoding="utf-8"))
+
+
+class HomeAnchorAndStateDirTests(unittest.TestCase):
+    """Symlinks above $HOME are the user's layout, not an attack; the state
+    directory is the plugin's own, so Omarchy's shared one is never touched."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="tvctl-home-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_symlinked_home_still_pairs(self):
+        real = self.tmp / "real-home"
+        real.mkdir()
+        link = self.tmp / "home"
+        link.symlink_to(real, target_is_directory=True)
+        tv = load_tvctl(link)
+        tv.save_token("12345678")
+        self.assertEqual(tv.load_token(), "12345678")
+        self.assertTrue((real / ".local/state/omarchy/tvremote/token").is_file())
+
+    def test_symlink_below_home_is_still_refused(self):
+        home = self.tmp / "h"
+        home.mkdir()
+        tv = load_tvctl(home)
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (home / ".local").mkdir()
+        (home / ".local" / "state").symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaises(OSError):
+            tv.save_token("12345678")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_shared_state_dir_mode_is_left_alone(self):
+        home = self.tmp / "h"
+        shared = home / ".local/state/omarchy"
+        shared.mkdir(parents=True)
+        shared.chmod(0o755)
+        tv = load_tvctl(home)
+        tv.save_token("12345678")
+        tv.load_token()
+        self.assertEqual(stat.S_IMODE(shared.stat().st_mode), 0o755)
+        own = shared / "tvremote"
+        self.assertEqual(stat.S_IMODE(own.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((own / "token").stat().st_mode), 0o600)
+
+    def test_legacy_state_is_migrated_once(self):
+        home = self.tmp / "h"
+        shared = home / ".local/state/omarchy"
+        shared.mkdir(parents=True)
+        (shared / "tvremote-token").write_text("87654321", encoding="utf-8")
+        (shared / "tvremote-host").write_text("192.168.1.20", encoding="utf-8")
+        tv = load_tvctl(home)
+        tv.migrate_state()
+        self.assertEqual(tv.load_token(), "87654321")
+        self.assertEqual(tv.load_host(), "192.168.1.20")
+        self.assertFalse((shared / "tvremote-token").exists())
+        self.assertFalse((shared / "tvremote-host").exists())
+        tv.migrate_state()                       # idempotent
+        self.assertEqual(tv.load_token(), "87654321")
+
+    def test_migration_never_overwrites_newer_state(self):
+        home = self.tmp / "h"
+        shared = home / ".local/state/omarchy"
+        shared.mkdir(parents=True)
+        (shared / "tvremote-token").write_text("11111111", encoding="utf-8")
+        tv = load_tvctl(home)
+        tv.save_token("22222222")
+        tv.migrate_state()
+        self.assertEqual(tv.load_token(), "22222222")
+
+    def test_config_of_the_wrong_shape_uses_defaults(self):
+        home = self.tmp / "h"
+        home.mkdir()
+        tv = load_tvctl(home)
+        for body in ({"apps": "x"}, {}, 5):
+            Path(tv.APPS_FILE).write_text(json.dumps(body), encoding="utf-8")
+            self.assertEqual([a["appId"] for a in tv.load_apps()],
+                             [a["appId"] for a in tv.DEFAULT_APPS])
+        Path(tv.APPS_FILE).write_text('{"apps": []}', encoding="utf-8")
+        self.assertEqual(tv.load_apps(), [])
 
 
 if __name__ == "__main__":
