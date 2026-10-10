@@ -700,10 +700,16 @@ def http_request(method, host, port, path, body=b"", headers=None, timeout=3):
         fields = {}
         for line in head[1:]:
             name, sep, value = line.partition(":")
-            if sep:
-                fields[name.strip().lower()] = value.strip()
+            if not sep:
+                continue
+            name, value = name.strip().lower(), value.strip()
+            # Two lengths that disagree make the body boundary ambiguous.
+            if name in fields and fields[name] != value:
+                raise ConnectionError(f"conflicting {name} headers")
+            fields[name] = value
 
-        if "chunked" in fields.get("transfer-encoding", "").lower():
+        coding = fields.get("transfer-encoding", "").lower()
+        if coding.rsplit(",", 1)[-1].strip() == "chunked":
             out = bytearray()
             while True:
                 eol = until(b"\r\n", 64)
@@ -720,12 +726,16 @@ def http_request(method, host, port, path, body=b"", headers=None, timeout=3):
                 while len(buf) < n + 2:
                     if not fill():
                         raise ConnectionError("reply cut short")
+                if buf[n:n + 2] != b"\r\n":
+                    raise ConnectionError("bad chunk framing")
                 out += buf[:n]
                 del buf[:n + 2]
             data = bytes(out)
         elif "content-length" in fields:
             length = fields["content-length"]
-            if not length.isdigit() or int(length) > MAX_HTTP:
+            if not (length.isascii() and length.isdigit()):
+                raise ConnectionError("bad Content-Length")
+            if int(length) > MAX_HTTP:
                 raise ValueError("reply too large")
             while len(buf) < int(length):
                 if not fill():
@@ -850,12 +860,33 @@ def discover(timeout=0.6, workers=64):
     for t in threads:
         t.join(timeout * 8 + 5)
 
+    # Identified in parallel and under one deadline, like the sweep: a
+    # single host answering for every free address would otherwise make
+    # this 253 sequential identify() calls while the panel sits blank.
     found = []
-    for ip in sorted(open_hosts):
-        info = identify(ip)
-        if info:
-            found.append(info)
-    return found
+    with lock:
+        pending = sorted(open_hosts)
+    deadline = time.monotonic() + 15
+
+    def identify_worker():
+        while time.monotonic() < deadline:
+            with qlock:
+                if not pending:
+                    return
+                ip = pending.pop()
+            info = identify(ip)
+            if info:
+                with lock:
+                    found.append(info)
+
+    threads = [threading.Thread(target=identify_worker, daemon=True)
+               for _ in range(min(16, len(pending)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(max(0, deadline - time.monotonic()))
+    with lock:
+        return sorted(found, key=lambda d: tuple(int(p) for p in d["ip"].split(".")))
 
 
 def load_host():
@@ -1151,7 +1182,7 @@ def foreground_app(timeout=3):
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout + 1)
+        t.join(timeout * 2 + 1)        # a probe's own deadline is 2x timeout
     if found[0]:
         save_last_app(found[0])
     return found[0] or ""
@@ -1286,8 +1317,29 @@ def scan_apps(timeout=3):
     results = {}
     lock = threading.Lock()
 
+    # Ids the TV gave any HTTP answer for. Only those can be judged "not
+    # installed": one that timed out may just be the TV's small HTTP server
+    # falling behind, and dropping it would throw away a pinned or
+    # hand-added tile along with its name and colour.
+    answered = set()
+
     def probe(app_id, fallback_name):
-        info = app_status(app_id, timeout)
+        if not valid_app_id(app_id):
+            return
+        try:
+            status, raw = http_request(
+                "GET", HOST, API_PORT, f"/api/v2/applications/{app_id}",
+                timeout=timeout)
+        except Exception:
+            return
+        with lock:
+            answered.add(app_id)
+        if status != 200:
+            return
+        try:
+            info = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            return
         if not isinstance(info, dict):
             return
         # The TV's own name can be a mouthful ("Spotify - Music and Podcasts"),
@@ -1349,9 +1401,16 @@ def scan_apps(timeout=3):
         t.join(max(0, deadline - time.monotonic()))
     with lock:
         done = dict(results)       # stragglers may still be writing
+        heard = set(answered)
+    if not done:
+        # Not one id answered: the TV is off or not listening, which says
+        # nothing about what is installed. Leave the config alone.
+        raise ConnectionError("the TV did not answer")
 
     # Configured order first, then anything new the scan turned up.
-    ordered = [done[a["appId"]] for a in load_apps() if a["appId"] in done]
+    ordered = [done[a["appId"]] if a["appId"] in done else a
+               for a in load_apps()
+               if a["appId"] in done or a["appId"] not in heard]
     seen = {a["appId"] for a in ordered}
     # One app often answers to two ids -- YouTube is both 111299001912 and
     # 9Ur5IzDKqV.TizenYouTube -- so a new id whose name is already present is

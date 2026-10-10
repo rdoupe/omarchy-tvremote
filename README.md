@@ -87,8 +87,8 @@ A partly-supported TV is still worth having:
 
 **Python 3 and nothing else.** No pip, no AUR, no `websocket-client`: `tvctl`
 implements the handful of RFC6455 frames the TV needs with the standard
-library, and imports only `base64 hashlib json os re socket ssl struct sys
-threading time urllib.request`.
+library, and imports only `base64 hashlib json os re socket ssl stat struct
+sys tempfile threading time`.
 
 Omarchy already guarantees Python — `omarchy` depends on `uwsm`, which depends
 on `python` — so on a stock install there is nothing to install. If the helper
@@ -153,7 +153,8 @@ Opening the panel is all it takes. Measured on a wiped install:
 ```
 
 The TV shows an **Allow / Deny** prompt the first time a given client name
-connects. Accept it with the physical remote; the token is saved to
+connects -- the panel switches to a large **"Look at your TV and approve"**
+the moment that prompt is up. Accept it with the physical remote; the token is saved to
 `~/.local/state/omarchy/tvremote-token` and pairing never happens again.
 
 Two things about that prompt are worth knowing, both learned the hard way:
