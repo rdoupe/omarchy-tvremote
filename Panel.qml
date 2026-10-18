@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "bounds.js" as Bounds
 
@@ -130,7 +131,7 @@ Panel {
   readonly property var pinnedApps: apps.filter(function(a) { return a.show !== false })
   readonly property var otherApps: apps.filter(function(a) { return a.show === false })
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property real keySize: Style.space(44)
 
@@ -738,7 +739,7 @@ Panel {
                 : root.needsPairing ? "waiting for you to allow it"
                 : root.errorText !== "" ? root.errorText
                 : root.linkUp ? "connected" : "connecting…"
-              color: root.errorText !== "" || !root.reachable ? Color.urgent : Color.muted
+              color: root.errorText !== "" || !root.reachable ? Commons.Color.urgent : Commons.Color.muted
               wrapMode: Text.WordWrap
               maximumLineCount: 2
               elide: Text.ElideRight
@@ -774,7 +775,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: "p"
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               anchors.left: parent.left
@@ -797,7 +798,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             text: "Can't start the helper"
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
             font.bold: true
@@ -811,7 +812,7 @@ Panel {
             // a plugin earns a manual review it does not need.
             text: "It needs /usr/bin/python3, and tvctl must be executable. "
                   + "Check the helper, then try again:"
-            color: Color.muted
+            color: Commons.Color.muted
             width: parent.width
             wrapMode: Text.WordWrap
             font.family: root.fontFamily
@@ -850,7 +851,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             text: "Couldn't wake " + root.tvName
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             font.bold: true
@@ -861,7 +862,7 @@ Panel {
             text: "Turn on network standby so the TV keeps listening while "
                   + "it sleeps:\nSettings → General → Network → Expert "
                   + "Settings → Power On with Mobile."
-            color: Color.muted
+            color: Commons.Color.muted
             width: parent.width
             wrapMode: Text.WordWrap
             font.family: root.fontFamily
@@ -883,7 +884,7 @@ Panel {
             Button {
               text: "dismiss"
               fontSize: Style.font.caption
-              foreground: Color.muted
+              foreground: Commons.Color.muted
               onClicked: root.wakeFailed = false
             }
           }
@@ -917,7 +918,7 @@ Panel {
             textFormat: Text.PlainText
             text: "Press Allow on the prompt to let this remote control "
                   + root.tvName + "."
-            color: Color.muted
+            color: Commons.Color.muted
             width: parent.width
             wrapMode: Text.WordWrap
             font.family: root.fontFamily
@@ -929,7 +930,7 @@ Panel {
             text: "No prompt? It may have been denied before — clear this "
                   + "device under Settings → General → External Device "
                   + "Manager → Device Connect Manager."
-            color: Color.muted
+            color: Commons.Color.muted
             width: parent.width
             wrapMode: Text.WordWrap
             opacity: 0.75
@@ -943,7 +944,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             text: "Waiting for the TV… take your time, this stays open."
-            color: Color.muted
+            color: Commons.Color.muted
             width: parent.width
             wrapMode: Text.WordWrap
             font.family: root.fontFamily
@@ -975,7 +976,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             text: "Several TVs on the network — which one?"
-            color: Color.muted
+            color: Commons.Color.muted
             width: parent.width
             wrapMode: Text.WordWrap
             font.family: root.fontFamily
@@ -1002,7 +1003,7 @@ Panel {
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.scanning ? "searching…" : "search again"
             fontSize: Style.font.caption
-            foreground: Color.muted
+            foreground: Commons.Color.muted
             onClicked: if (!root.scanning) root.rediscover()
           }
         }
@@ -1081,7 +1082,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: "m"
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               anchors.left: parent.left
@@ -1099,7 +1100,7 @@ Panel {
                 textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: root.volumeIcon
-                color: root.muted ? Color.urgent : root.fg
+                color: root.muted ? Commons.Color.urgent : root.fg
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.icon
               }
@@ -1108,7 +1109,7 @@ Panel {
                 textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: root.volume >= 0 ? String(root.volume) : "—"
-                color: Color.muted
+                color: Commons.Color.muted
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
@@ -1143,7 +1144,7 @@ Panel {
               visible: root.otherApps.length > 0
               text: (root.moreOpen ? "󰅃  " : "󰅀  ") + root.otherApps.length + " more on the TV"
               fontSize: Style.font.body
-              foreground: Color.muted
+              foreground: Commons.Color.muted
               tooltipText: "Apps found on the TV. Pin one to give it a numbered tile."
               onClicked: root.moreOpen = !root.moreOpen
             }
@@ -1155,7 +1156,7 @@ Panel {
               iconText: root.scanning ? "" : "󰑐"
               iconSize: Style.font.body
               fontSize: Style.font.body
-              foreground: Color.muted
+              foreground: Commons.Color.muted
               verticalPadding: Style.space(2)
               tooltipText: "Rescan the TV for installed apps"
               onClicked: if (!root.scanning) root.rescanApps()
@@ -1205,7 +1206,7 @@ Panel {
                     height: Style.space(28)
                     iconText: "󰤱"           // md-pin-outline
                     iconSize: Style.font.body
-                    foreground: Color.muted
+                    foreground: Commons.Color.muted
                     bordered: true
                     tooltipText: "Pin " + String(root.otherApps[index].name) + " to the tiles"
                     onClicked: root.togglePin(String(root.otherApps[index].key))
@@ -1226,7 +1227,7 @@ Panel {
           visible: root.hotkey !== "" && !root.blocked
           anchors.horizontalCenter: parent.horizontalCenter
           text: root.hotkey + "  ·  opens this"
-          color: Color.muted
+          color: Commons.Color.muted
           opacity: 0.75
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1299,7 +1300,7 @@ Panel {
       textFormat: Text.PlainText
       visible: appTile.number > 0
       text: String(appTile.number)
-      color: Color.muted
+      color: Commons.Color.muted
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       anchors.left: parent.left
@@ -1373,7 +1374,7 @@ Panel {
       textFormat: Text.PlainText
       visible: keyButton.shortcutHint !== ""
       text: keyButton.shortcutHint
-      color: Color.muted
+      color: Commons.Color.muted
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       anchors.left: parent.left
