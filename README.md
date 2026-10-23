@@ -364,6 +364,15 @@ instead of 254, but its replies are unicast UDP that default-deny firewalls
 silently eat. On a monitored or corporate network the sweep may still look
 like scanning to an IDS, so it is worth knowing it happens.
 
+**Nothing runs while the popup is closed.** No checks, no discovery, no
+connection: the bar icon shows what the last open saw, and before the first
+open it claims nothing either way. Opening the popup is what reaches the TV.
+A key from the bar icon (scroll, right-click) connects for that key and lets
+go ten seconds later. The one exception is *Hide the icon while the TV is
+off*, off by default: it cannot know the TV came back on without asking, so
+with it on the TV is checked in the background on the interval you set, and
+never with a discovery sweep.
+
 **Wake-on-LAN broadcasts** at most a dozen small UDP packets to
 `255.255.255.255` and your subnet broadcast, and only when you ask.
 

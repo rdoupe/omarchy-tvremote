@@ -18,8 +18,13 @@ import "bounds.js" as Bounds
 //
 //   A handshake per keypress is too slow to steer a menu with. tvctl therefore
 //   runs as a `serve` child holding one socket open, and a press is a single
-//   line on its stdin. The child lives only while the panel is open; the bar
-//   tooltip is fed by a much cheaper one-shot poll.
+//   line on its stdin. The child lives only while the panel is open.
+//
+// Nothing touches the network while the panel is closed. Every check reaches
+// for the TV over Wi-Fi, a TV that is off turns each one into seconds of
+// retries -- and, with the cached address gone quiet, into a sweep of the
+// whole /24 -- so the closed bar icon shows what the last open saw instead.
+// The one exception is hideWhenOff, which cannot work without asking.
 //
 // While the panel has focus the physical arrow keys, Enter, and Backspace
 // drive the TV directly, which is the point of the whole widget -- the D-pad
@@ -46,6 +51,9 @@ Panel {
   readonly property bool resumeLastApp: String(setting("resumeLastApp", true)) !== "false"
 
   // Device facts, refreshed by `tvctl state`.
+  // False until the first state report since shell start. Nothing is asked
+  // before the panel opens, so until then the icon claims nothing either way.
+  property bool stateKnown: false
   property bool reachable: false
   property bool paired: false
   // Whether a MAC has been learned, which is what makes wake-on-LAN possible.
@@ -225,12 +233,17 @@ Panel {
   // that key would open the remote channel and put the TV's Allow prompt up
   // with nothing on this screen saying why -- so it opens the panel instead,
   // which asks for pairing where the user can see it.
+  //
+  // Before the panel has opened once nothing has been asked, so `paired` is
+  // unknown rather than false. That first key opens the panel too: it is the
+  // first contact with the TV either way.
   function barKey(key) {
     if (!paired) {
       if (!opened) toggle()
       return
     }
     press(key)
+    if (!opened) barIdle.restart()
   }
 
   function press(key) {
@@ -338,6 +351,7 @@ Panel {
       return
     }
     if (msg.type === "state") {
+      stateKnown = true
       reachable = !!msg.reachable
       // A live remote socket is itself proof of authorisation: the TV sends
       // ms.channel.connect only once it has allowed us, and 2015 sets allow
@@ -510,11 +524,12 @@ Panel {
     return parts.join(" + ")
   }
 
-  // Cheap liveness for the bar tooltip while the panel is closed: an HTTP GET
-  // at the TV, no remote-control socket and no pairing involved.
+  // Liveness for hideWhenOff while the panel is closed: an HTTP GET at the
+  // TV, no remote-control socket and no pairing involved. --no-discover keeps
+  // a TV that is off from turning every check into a sweep of the /24.
   Process {
     id: stateProc
-    command: [root.python3Bin, "-I", "-B", root.helper, "state"]
+    command: [root.python3Bin, "-I", "-B", root.helper, "state", "--no-discover"]
     clearEnvironment: true
     environment: root.launchEnvironment()
     stdout: SplitParser {
@@ -524,12 +539,26 @@ Panel {
     onStarted: root.stateBuf = ""
   }
 
+  // Only for hideWhenOff, which is opt-in and cannot see the TV come on
+  // without asking. Everyone else gets no timer at all: this poll used to run
+  // from shell start, once per bar, and kept the Wi-Fi busy retrying a TV
+  // that was off.
   Timer {
+    id: offPoll
     interval: root.pollInterval
-    running: !root.opened
+    running: !root.opened && root.hideWhenOff
     repeat: true
     triggeredOnStart: true
     onTriggered: if (!stateProc.running && !daemon.running) stateProc.running = true
+  }
+
+  // A key from the closed bar icon starts the serve child, which would then
+  // sit on an open socket to the TV with nothing to say. Scrolling is a burst
+  // of notches, so it stays up this long after the last one, then goes.
+  Timer {
+    id: barIdle
+    interval: 10000
+    onTriggered: root.closeDaemonIfIdle()
   }
 
   // Clears the pressed-key highlight; purely cosmetic.
@@ -616,6 +645,7 @@ Panel {
   }
 
   function tooltip() {
+    if (!stateKnown) return tvName + " — open to connect"
     if (!reachable) return tvName + " — off or unreachable"
     var parts = [tvName]
     if (volume >= 0) parts.push(muted ? "muted" : "vol " + volume)
@@ -625,7 +655,8 @@ Panel {
 
   // ------------------------------------------------------------ bar widget
 
-  readonly property bool shown: reachable || !hideWhenOff
+  // Until something has been asked, hideWhenOff has nothing to go on.
+  readonly property bool shown: reachable || !stateKnown || !hideWhenOff
   visible: shown
   implicitWidth: shown ? button.implicitWidth : 0
   implicitHeight: shown ? button.implicitHeight : 0
@@ -639,7 +670,8 @@ Panel {
     // the antenna is what makes this read as a TV and not a display.
     text: "󰟴"
     active: root.opened
-    opacity: root.reachable ? 1 : 0.45
+    // Dimmed only on a report that the TV was off; unknown is not off.
+    opacity: root.reachable || !root.stateKnown ? 1 : 0.45
     tooltipText: root.tooltip()
     onPressed: function(b) {
       if (b === Qt.RightButton) root.barKey("mute")
