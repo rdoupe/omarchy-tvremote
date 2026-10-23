@@ -33,14 +33,6 @@ def qml_blocks(qml, opener):
     return blocks
 
 
-def js_bool(expr, scope):
-    """Evaluate a QML binding made only of !, &&, || and root.<bool>."""
-    py = re.sub(r"root\.(\w+)", lambda m: repr(scope[m.group(1)]), expr)
-    py = py.replace("&&", " and ").replace("||", " or ")
-    py = re.sub(r"!(?!=)", " not ", py)
-    return bool(eval(py, {"__builtins__": {}}))
-
-
 class ClosedPanelTimerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -69,13 +61,10 @@ class ClosedPanelTimerTests(unittest.TestCase):
         for block in spawning:
             running = re.search(r"running: (.+)", block)
             self.assertIsNotNone(running, "a spawning timer must be gated, not started by hand")
-            expr = running.group(1)
-            closed = {"opened": False, "hideWhenOff": defaults["hideWhenOff"]}
-            self.assertFalse(js_bool(expr, closed), expr)
-            # Opening the panel does its own first contact through the daemon;
-            # the poll is for the closed, opted-in case only.
-            self.assertFalse(js_bool(expr, {"opened": True, "hideWhenOff": True}), expr)
-            self.assertTrue(js_bool(expr, {"opened": False, "hideWhenOff": True}), expr)
+            # Off with the defaults (hideWhenOff false) and whenever the panel
+            # is open: opening does its own first contact through the daemon,
+            # so the poll is for the closed, opted-in case only.
+            self.assertEqual(running.group(1).strip(), "!root.opened && root.hideWhenOff")
 
     def test_opt_in_poll_never_discovers(self):
         self.assertIn(
