@@ -2166,7 +2166,10 @@ def _volume_after(_cmd):
 def main(argv):
     migrate_state()
     if argv and argv[0] not in ("-h", "--help", "discover", "pick", "unpair"):
-        ensure_host()
+        # `state --no-discover` is the panel's background check (hideWhenOff
+        # only). A TV that is off fails its cached address every time, and
+        # sweeping the /24 on each check is not a background job.
+        ensure_host(allow_discovery=argv[:2] != ["state", "--no-discover"])
         # `serve` is the one command that is useful without a TV: it is what
         # presents the picker when several were found, and the "no TV found"
         # state when none were. Bailing here left first-launch users on a
@@ -2177,7 +2180,8 @@ def main(argv):
             return 1
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip().splitlines()[0])
-        print("usage: tvctl serve | discover | state | apps | scan [--save]"
+        print("usage: tvctl serve | discover | state [--no-discover]"
+              " | apps | scan [--save]"
               " | app <name> | wake | hold <key> [secs] | unpair [--all]"
               " | <key>...")
         print("keys:  " + " ".join(sorted(KEYS)))

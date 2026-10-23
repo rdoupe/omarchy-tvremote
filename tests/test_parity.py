@@ -45,7 +45,8 @@ class LaunchContractTests(unittest.TestCase):
         self.assertIn(
             'command: [root.python3Bin, "-I", "-B", root.helper, "serve"]', self.qml)
         self.assertIn(
-            'command: [root.python3Bin, "-I", "-B", root.helper, "state"]', self.qml)
+            'command: [root.python3Bin, "-I", "-B", root.helper, "state", "--no-discover"]',
+            self.qml)
         self.assertNotIn('["python3"', self.qml)
         self.assertNotIn("[root.helper, \"serve\"]", self.qml)
         self.assertIn("decodeURIComponent(", self.qml)

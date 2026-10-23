@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.rdoupe.tvremote",
   "name": "Samsung TV Remote",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "author": "Ryan Doupe",
   "license": "MIT",
   "description": "Ask your agent to bind it to Super+R and customize the app bindings to what you like. Arrows to move, Enter for OK, Backspace for back, - and = for volume, M for mute, P for on and off, 1-9 for your apps. Scroll the bar icon for volume, right-click to mute. Held keys repeat like the real remote. Wakes the TV and reopens what you were watching. Finds the TV by itself, no IP to enter. Samsung Tizen TVs, 2016 and newer.",
@@ -34,7 +34,7 @@
       {
         "key": "pollIntervalSec",
         "type": "integer",
-        "label": "How often to check the TV while the popup is closed (seconds)",
+        "label": "With the icon hidden while the TV is off: how often to check the TV in the background (seconds)",
         "min": 15,
         "max": 600,
         "step": 15,
@@ -43,7 +43,7 @@
       {
         "key": "hideWhenOff",
         "type": "boolean",
-        "label": "Hide the icon while the TV is off",
+        "label": "Hide the icon while the TV is off (checks the TV in the background; otherwise nothing runs until the popup opens)",
         "defaultValue": false
       },
       {
